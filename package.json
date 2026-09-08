@@ -1,0 +1,23 @@
+{
+  "name": "clanker",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "contract:emit": "prisma contract emit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "chat": "4.40.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "prettier": "^3.9.6"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  }
+}
