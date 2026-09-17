@@ -6,3 +6,6 @@
   - If an exception is unlikely to happen, do not check for it. Let it throw and bubble up.
   - If a type is only going to be used in one or two places, inline it.
 - This project is early days, do not write tests. Once it takes a more mature form, we'll worry about testing.
+- Work in the checkout assigned to this task. Do not edit other worktrees or switch their branches.
+- Do not start the live Discord bot unless explicitly requested.
+- Before finishing, run `bun run format:check` and `bun run typecheck`.

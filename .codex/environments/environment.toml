@@ -1,0 +1,15 @@
+version = 1
+name = "clanker"
+
+[setup]
+script = "bun install --frozen-lockfile"
+
+[[actions]]
+name = "Check formatting"
+icon = "tool"
+command = "bun run format:check"
+
+[[actions]]
+name = "Check types"
+icon = "tool"
+command = "bun run typecheck"
