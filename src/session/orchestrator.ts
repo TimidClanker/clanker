@@ -4,7 +4,8 @@ import { z } from 'zod'
 import { ClankerSession } from '.'
 
 export class Orchestrator {
-  private static sessions = new Map<string, ClankerSession>()
+  private static readonly sessionLimit = 32
+  private sessions = new Map<string, { session: ClankerSession; threadId: string; ownerId: string; busy: boolean }>()
 
   private static sessionSchema = z.object({ action: z.enum(['new', 'resume']), id: z.string().optional().describe('The session to resume') })
 
@@ -23,6 +24,7 @@ ${JSON.stringify(this.sessionSchema.toJSONSchema())}
   ) {
     chat.onNewMention(this.handleIncomingMessage)
     chat.onDirectMessage(this.handleIncomingMessage)
+    chat.onSubscribedMessage(this.handleIncomingMessage)
   }
 
   static async initialize(chat: Chat) {
@@ -30,7 +32,8 @@ ${JSON.stringify(this.sessionSchema.toJSONSchema())}
       model: 'gpt-5.6-luna',
       thinkingLevel: 'low',
       system: Orchestrator.systemPrompt,
-      noTools: true
+      noTools: true,
+      ephemeral: true
     })
 
     await chat.initialize()
@@ -39,64 +42,81 @@ ${JSON.stringify(this.sessionSchema.toJSONSchema())}
 
   protected handleIncomingMessage = async (thread: Thread, message: Message) => {
     try {
-      const session = await this.orchestrator.fork({ ephemeral: true })
+      this.retireIdleSessions()
+      // The model can select work, but cannot change its owner or audience.
+      const eligibleSessions = Array.from(this.sessions.values())
+        .filter(s => s.threadId === thread.id && s.ownerId === message.author.userId)
+        .reverse()
+        .slice(0, Orchestrator.sessionLimit)
+        .map(s => s.session)
+      const routing = await this.orchestrator.fork({ ephemeral: true })
+      let result: z.infer<typeof Orchestrator.sessionSchema>
+      try {
+        const existingSessions = eligibleSessions.map(
+          s => `- ID: ${s.id}\tTitle: ${s.metadata.title?.slice(0, 200)}\tKeywords: ${s.metadata.keywords?.join(', ').slice(0, 300)}`
+        )
+        if (existingSessions.length === 0) existingSessions.push('There are no existing sessions.')
 
-      const existingSessions = Array.from(Orchestrator.sessions.values()).map(
-        s => `- ID: ${s.id}\tTitle: ${s.metadata.title}\tKeywords: ${s.metadata.keywords?.join(', ')}`
-      )
-      if (existingSessions.length === 0) existingSessions.push('There are no existing sessions.')
+        await routing.prompt([
+          'Here are some existing sessions that can be resumed:',
+          ...existingSessions,
+          '\nRoute this incoming event:',
+          `Thread ID: ${thread.id}`,
+          `Sender: ${JSON.stringify(message.author)}`,
+          `Message:\n${message.text}`
+        ])
 
-      await session.prompt([
-        'Here are some existing sessions that can be resumed:',
-        ...existingSessions,
-        '\nRoute this incoming event:',
-        `Thread ID: ${thread.id}`,
-        `Sender: ${JSON.stringify(message.author)}`,
-        `Message:\n${message.text}`
-      ])
-
-      for (const message of session.session.messages)
-        if (message.role === 'assistant')
-          message.content.forEach(c => console.debug(`[orchestrator] ${c.type}: ${c.type === 'text' ? c.text : c.type === 'thinking' ? c.thinking : c.name}`))
-
-      const decision = session.session.messages.findLast(m => m.role === 'assistant')
-      const result = Orchestrator.sessionSchema.parse(JSON.parse(decision?.content.find(c => c.type === 'text')?.text ?? '{}'))
-
-      if (result.action === 'new') {
-        await this.createNewSession(thread, message)
-      } else if (result.action === 'resume' && result.id) {
-        await this.resumeSession(result.id, thread, message)
+        const decision = routing.session.messages.findLast(m => m.role === 'assistant')
+        result = Orchestrator.sessionSchema.parse(JSON.parse(decision?.content.find(c => c.type === 'text')?.text ?? '{}'))
+      } finally {
+        routing.session.dispose()
       }
+
+      // A candidate may have been retired while the routing call was running.
+      const resumedSession = result.action === 'resume' ? eligibleSessions.find(s => s.id === result.id && this.sessions.has(s.id)) : undefined
+      if (resumedSession) await this.runSession(resumedSession, thread, message)
+      else await this.createNewSession(thread, message)
     } catch (error) {
       console.error(error)
-      thread.post(`☠️ Unable to process message. \`${error}\``)
+      await thread.post(`☠️ Unable to process message. \`${error}\``).catch(error => console.error('[orchestrator] Unable to report failure', error))
     }
-  }
-
-  private static generateId(thread: Thread) {
-    return `${thread.id}:${new Date().getTime()}`
   }
 
   private async createNewSession(thread: Thread, message: Message) {
-    const newSession = await ClankerSession.create(Orchestrator.generateId(thread), { model: 'gpt-5.6-sol', thinkingLevel: 'low' })
-    await newSession.attach(thread, message)
-    Orchestrator.sessions.set(newSession.id, newSession)
-
-    newSession.prompt([`You received this message:`, `Thread ID: ${thread.id}`, `Sender: ${JSON.stringify(message.author)}`, `Message:\n${message.text}`])
-
-    return newSession
+    const session = await ClankerSession.create(`${thread.id}:${crypto.randomUUID()}`, { model: 'gpt-5.6-sol', thinkingLevel: 'low' })
+    this.sessions.set(session.id, { session, threadId: thread.id, ownerId: message.author.userId, busy: false })
+    await this.runSession(session, thread, message)
+    return session
   }
 
-  private async resumeSession(sessionId: string, thread: Thread, message: Message) {
-    const session = Orchestrator.sessions.get(sessionId)
-    if (!session) {
-      console.error(`[orchestrator] Session ${sessionId} not found! Handing off to a new session...`)
-      return await this.createNewSession(thread, message)
+  private async runSession(session: ClankerSession, thread: Thread, message: Message) {
+    const live = this.sessions.get(session.id)!
+    if (live.busy) throw new Error('Session is busy. Please retry after the current response finishes.')
+    live.busy = true
+    this.sessions.delete(session.id)
+    this.sessions.set(session.id, live)
+    try {
+      await session.attach(thread)
+      await session.prompt([`You received this message:`, `Thread ID: ${thread.id}`, `Sender: ${JSON.stringify(message.author)}`, `Message:\n${message.text}`])
+      // One metadata job per completed turn, after Pi retries and response posting settle.
+      await session.updateMetadata().catch(error => console.error(`[clanker] Unable to update metadata for ${session.id}`, error))
+    } finally {
+      live.busy = false
+      this.retireIdleSessions()
     }
+  }
 
-    await session.attach(thread, message)
-    session.prompt([`You received this message:`, `Thread ID: ${thread.id}`, `Sender: ${JSON.stringify(message.author)}`, `Message:\n${message.text}`])
+  private retireIdleSessions() {
+    for (const [id, { session, busy }] of this.sessions) {
+      if (this.sessions.size <= Orchestrator.sessionLimit) break
+      if (busy || !session.session.isIdle) continue
 
-    return session
+      const manager = session.session.sessionManager
+      manager.appendCustomEntry('clanker:metadata', session.metadata)
+      if (session.metadata.title) manager.appendSessionInfo(session.metadata.title)
+      session.session.dispose()
+      this.sessions.delete(id)
+      console.log(`[clanker] Retired session ${id}; Pi history: ${manager.getSessionFile()}`)
+    }
   }
 }
