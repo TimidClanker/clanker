@@ -21,6 +21,8 @@ export interface ClankerSessionMetadata {
   keywords?: string[]
   /** A bullet list of meaningful actions in this session. */
   summary?: string
+  /** The latest assistant response containing user-facing text. */
+  lastResponse?: string
 }
 
 interface CreateClankerSession {
@@ -49,6 +51,14 @@ export class ClankerSession {
     private readonly options: CreateClankerSession
   ) {
     this.metadata = { id }
+    session.subscribe(event => {
+      if (event.type !== 'message_end' || event.message.role !== 'assistant') return
+      const text = event.message.content
+        .filter(content => content.type === 'text')
+        .map(content => content.text)
+        .join('\n')
+      if (text.trim()) this.metadata.lastResponse = text
+    })
   }
 
   static async create(id: string, options: CreateClankerSession = {}, manager?: SessionManager): Promise<ClankerSession> {
