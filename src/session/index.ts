@@ -42,7 +42,7 @@ interface CreateClankerSession {
 
 export class ClankerSession {
   public metadata: ClankerSessionMetadata
-  private responseThreadId?: string
+  private responseThread?: Thread
   private prompting = false
   private postQueue: Promise<void> = Promise.resolve()
   private stopped = false
@@ -147,8 +147,21 @@ export class ClankerSession {
     // Reserve the session before Pi's async preflight starts.
     if (this.prompting || !this.session.isIdle) throw new Error('Session is busy. Please retry after the current response finishes.')
     const prompt = Array.isArray(text) ? text.filter(Boolean).join('\n') : text
+    const thread = this.responseThread
+    let typing: Promise<void> | undefined
+    const updateTyping = () => {
+      if (this.stopped || typing || !thread) return
+      typing = thread
+        .startTyping()
+        .catch(error => console.warn('[clanker] Unable to show typing indicator', error))
+        .finally(() => {
+          typing = undefined
+        })
+    }
     this.prompting = true
+    const typingTimer = thread ? setInterval(updateTyping, 5000).unref() : undefined
     try {
+      updateTyping()
       await this.session.prompt(prompt, {
         images: options.images,
         // Abort can arrive during Pi's async preflight, before an agent run exists.
@@ -157,21 +170,25 @@ export class ClankerSession {
         }
       })
     } finally {
+      clearInterval(typingTimer)
+      await typing
       await this.postQueue
+      await thread?.adapter.endTyping?.(thread.id).catch(error => console.warn('[clanker] Unable to clear typing indicator', error))
       this.prompting = false
     }
   }
 
   async attach(thread: Thread) {
-    if (this.responseThreadId && this.responseThreadId !== thread.id) throw new Error('A session cannot reply in another thread')
-    if (this.responseThreadId === thread.id) {
+    if (this.responseThread && this.responseThread.id !== thread.id) throw new Error('A session cannot reply in another thread')
+    if (this.responseThread?.id === thread.id) {
+      this.responseThread = thread
       console.debug(`[clanker] ${this.id} is already attached to thread ${thread.id}`)
       return
     }
 
     console.log(`[clanker] Attaching ${thread.id} to session ${this.id}`)
     await thread.subscribe()
-    this.responseThreadId = thread.id
+    this.responseThread = thread
 
     this.session.subscribe(event => {
       if (event.type !== 'message_end' || event.message.role !== 'assistant') return
