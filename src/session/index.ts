@@ -6,6 +6,7 @@ import {
   resolveCliModel,
   SessionManager,
   type AgentSession,
+  type PromptOptions,
   type ToolDefinition
 } from '@earendil-works/pi-coding-agent'
 import type { Thread } from 'chat'
@@ -141,7 +142,7 @@ export class ClankerSession {
     return model.model
   }
 
-  async prompt(text: (string | boolean | null)[] | string) {
+  async prompt(text: (string | boolean | null)[] | string, options: Pick<PromptOptions, 'images'> = {}) {
     if (this.stopped) throw new Error('Session is shutting down')
     // Reserve the session before Pi's async preflight starts.
     if (this.prompting || !this.session.isIdle) throw new Error('Session is busy. Please retry after the current response finishes.')
@@ -149,6 +150,7 @@ export class ClankerSession {
     this.prompting = true
     try {
       await this.session.prompt(prompt, {
+        images: options.images,
         // Abort can arrive during Pi's async preflight, before an agent run exists.
         preflightResult: () => {
           if (this.stopped) throw new Error('Session is shutting down')

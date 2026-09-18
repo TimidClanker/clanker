@@ -1,4 +1,5 @@
 import { choice, TypeSafeClient } from '@typesafe-ai/sdk'
+import { describeAttachments } from '../attachments'
 import { isMostRecentResponse, routingInstructions, type RoutingBackend, type RoutingInput } from '.'
 
 export class TypeSafeRoutingBackend implements RoutingBackend {
@@ -24,7 +25,7 @@ export class TypeSafeRoutingBackend implements RoutingBackend {
     )
     const response = await this.client.systemOne(
       {
-        state: { message: message.text, sessions: candidates },
+        state: { message: message.text, attachments: describeAttachments(message), sessions: candidates },
         questions: {
           session: choice(`Which session does the incoming message clearly continue? ${routingInstructions}`, {
             new: 'Start a new session when the message does not clearly continue any listed session.',

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ClankerSession } from '..'
+import { describeAttachments } from '../attachments'
 import { isMostRecentResponse, routingInstructions, type RoutingBackend, type RoutingInput } from '.'
 
 export class LLMRoutingBackend implements RoutingBackend {
@@ -46,7 +47,8 @@ ${JSON.stringify(LLMRoutingBackend.schema.toJSONSchema())}`,
         '\nRoute this incoming event:',
         `Thread ID: ${threadId}`,
         `Sender: ${JSON.stringify(message.author)}`,
-        `Message:\n${message.text}`
+        `Message:\n${message.text}`,
+        message.attachments.length > 0 && `Attachments: ${JSON.stringify(describeAttachments(message))}`
       ])
       signal.throwIfAborted()
       const decision = routing.session.messages.findLast(m => m.role === 'assistant')

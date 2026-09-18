@@ -2,6 +2,7 @@ import type { Chat, Thread, Message } from 'chat'
 
 import { ClankerSession } from '.'
 import { SessionStore, type SavedSessionSummary } from '../storage/sessions'
+import { prepareAttachments } from './attachments'
 import type { RoutingBackend, RoutingInput } from './routing'
 import { LLMRoutingBackend } from './routing/llm'
 import { TypeSafeRoutingBackend } from './routing/typesafe'
@@ -127,7 +128,10 @@ export class Orchestrator {
       const saved = id ? await this.store.load(id, thread.id, message.author.userId) : undefined
       const session = saved
         ? await ClankerSession.restore(saved.id, saved.metadata, saved.snapshot)
-        : await ClankerSession.create(`${thread.id}:${crypto.randomUUID()}`, { model: 'gpt-5.6-sol', thinkingLevel: 'low' })
+        : await ClankerSession.create(`${thread.id}:${crypto.randomUUID()}`, {
+            model: process.env.DEFAULT_MODEL?.trim() || 'gpt-5.6-sol',
+            thinkingLevel: 'low'
+          })
       const now = new Date().toISOString()
       live = {
         session,
@@ -156,7 +160,19 @@ export class Orchestrator {
       if (this.stopping) return
       await session.attach(thread)
       if (this.stopping) return
-      await session.prompt([`You received this message:`, `Thread ID: ${thread.id}`, `Sender: ${JSON.stringify(message.author)}`, `Message:\n${message.text}`])
+      const { files, images } = await prepareAttachments(message, this.routingAbort.signal)
+      if (this.stopping) return
+      await session.prompt(
+        [
+          `You received this message:`,
+          `Thread ID: ${thread.id}`,
+          `Sender: ${JSON.stringify(message.author)}`,
+          `Message:\n${message.text}`,
+          files.length > 0 &&
+            `Attachments:\n${JSON.stringify(files)}\nImages marked inlineImage are included in the same order. Use your tools to read the saved files at their local paths.`
+        ],
+        { images }
+      )
       if (!this.stopping) {
         await session.updateMetadata().catch(error => console.error(`[clanker] Unable to update metadata for ${session.id}`, error))
       }
