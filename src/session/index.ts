@@ -203,7 +203,8 @@ export class ClankerSession {
     const { session } = await createAgentSession({
       model: model!,
       thinkingLevel: options?.thinkingLevel ?? this.session.thinkingLevel,
-      resourceLoader: options.system === undefined ? this.session.resourceLoader : await ClankerSession.getResourceLoader(options.system),
+      // Loaders own extension state, so each session needs its own lifetime.
+      resourceLoader: await ClankerSession.getResourceLoader(options.system),
       sessionManager: manager,
       tools: options.noTools ? [] : options.tools,
       customTools: options?.customTools
