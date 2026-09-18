@@ -1,18 +1,13 @@
 import { type Chat } from 'chat'
 import { type DiscordAdapter } from '@chat-adapter/discord'
 
-export async function registerDiscordGateway(instance: Chat) {
+export async function registerDiscordGateway(instance: Chat, signal: AbortSignal) {
   const discord = instance.getAdapter('discord') as DiscordAdapter
   if (!discord) return
 
-  const abortController = new AbortController()
   let gatewayTask: Promise<unknown> | undefined
 
-  const shutdown = () => abortController.abort()
-  process.once('SIGINT', shutdown)
-  process.once('SIGTERM', shutdown)
-
-  while (!abortController.signal.aborted) {
+  while (!signal.aborted) {
     const response = await discord.startGatewayListener(
       {
         waitUntil(task) {
@@ -20,7 +15,7 @@ export async function registerDiscordGateway(instance: Chat) {
         }
       },
       60 * 60 * 1000,
-      abortController.signal
+      signal
     )
 
     if (!response.ok) {

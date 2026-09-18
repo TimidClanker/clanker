@@ -12,7 +12,7 @@ import type { Thread } from 'chat'
 import type { TSchema } from 'typebox'
 import { createMetadataTool } from './tools/metadata'
 
-interface ClankerSessionMetadata {
+export interface ClankerSessionMetadata {
   /** An identifier for the session. */
   id: string
   /** A high-level summary of the topic of the session. */
@@ -25,7 +25,7 @@ interface ClankerSessionMetadata {
 
 interface CreateClankerSession {
   model?: string
-  thinkingLevel?: 'low' | 'medium' | 'high' | 'xhigh'
+  thinkingLevel?: AgentSession['thinkingLevel']
   system?: string
   /** Disable all tools, including custom tools. Takes precedence over tools. */
   noTools?: boolean
@@ -40,6 +40,8 @@ export class ClankerSession {
   private responseThreadId?: string
   private prompting = false
   private postQueue: Promise<void> = Promise.resolve()
+  private stopped = false
+  private metadataSession?: ClankerSession
 
   private constructor(
     readonly session: AgentSession,
@@ -49,7 +51,7 @@ export class ClankerSession {
     this.metadata = { id }
   }
 
-  static async create(id: string, options: CreateClankerSession = {}): Promise<ClankerSession> {
+  static async create(id: string, options: CreateClankerSession = {}, manager?: SessionManager): Promise<ClankerSession> {
     const model = await ClankerSession.getModel(options?.model)
     if (!model) throw new Error('No available models')
 
@@ -61,12 +63,44 @@ export class ClankerSession {
       resourceLoader,
       tools: options.noTools ? [] : options.tools,
       customTools: options.customTools,
-      sessionManager: options?.ephemeral ? SessionManager.inMemory() : undefined
+      sessionManager: manager ?? (options.ephemeral ? SessionManager.inMemory() : undefined)
     })
 
-    console.log(`[clanker] Created new ${model.provider}/${model.id}:${session.thinkingLevel} session ${id}`)
+    console.log(`[clanker] ${manager ? 'Reopened existing' : 'Created new'} ${model.provider}/${model.id}:${session.thinkingLevel} session ${id}`)
 
     return new ClankerSession(session, id, options)
+  }
+
+  snapshot() {
+    if (this.options.ephemeral) throw new Error('Ephemeral sessions cannot be saved')
+    const manager = this.session.sessionManager
+    return {
+      settings: {
+        model: `${this.session.model!.provider}/${this.session.model!.id}`,
+        thinkingLevel: this.session.thinkingLevel,
+        system: this.options.system,
+        noTools: this.options.noTools,
+        tools: this.options.tools ?? this.session.getActiveToolNames()
+      },
+      leafId: manager.getLeafId(),
+      jsonl: [manager.getHeader(), ...manager.getEntries()].map(entry => JSON.stringify(entry)).join('\n') + '\n'
+    }
+  }
+
+  static async restore(
+    id: string,
+    metadata: ClankerSessionMetadata,
+    snapshot: ReturnType<ClankerSession['snapshot']>,
+    customTools?: CreateClankerSession['customTools']
+  ) {
+    const path = `.data/sessions/${new Bun.CryptoHasher('sha256').update(id).digest('hex')}.jsonl`
+    await Bun.write(path, snapshot.jsonl)
+    const manager = SessionManager.open(path, undefined, process.cwd())
+    if (snapshot.leafId) manager.branch(snapshot.leafId)
+    else manager.resetLeaf()
+    const session = await ClankerSession.create(id, { ...snapshot.settings, customTools }, manager)
+    session.metadata = metadata
+    return session
   }
 
   private static async getResourceLoader(system?: string) {
@@ -93,12 +127,18 @@ export class ClankerSession {
   }
 
   async prompt(text: (string | boolean | null)[] | string) {
+    if (this.stopped) throw new Error('Session is shutting down')
     // Reserve the session before Pi's async preflight starts.
     if (this.prompting || !this.session.isIdle) throw new Error('Session is busy. Please retry after the current response finishes.')
     const prompt = Array.isArray(text) ? text.filter(Boolean).join('\n') : text
     this.prompting = true
     try {
-      await this.session.prompt(prompt)
+      await this.session.prompt(prompt, {
+        // Abort can arrive during Pi's async preflight, before an agent run exists.
+        preflightResult: () => {
+          if (this.stopped) throw new Error('Session is shutting down')
+        }
+      })
     } finally {
       await this.postQueue
       this.prompting = false
@@ -131,6 +171,7 @@ export class ClankerSession {
   async fork(options: CreateClankerSession = {}) {
     options = {
       ...options,
+      system: options.system ?? this.options.system,
       noTools: options.noTools ?? this.options.noTools,
       tools: options.tools ?? this.options.tools,
       customTools: options.customTools ?? this.options.customTools
@@ -173,6 +214,7 @@ export class ClankerSession {
   }
 
   async updateMetadata() {
+    if (this.stopped) return
     const child = await this.fork({
       ephemeral: true,
       model: 'gpt-5.6-luna',
@@ -181,10 +223,19 @@ export class ClankerSession {
       tools: ['metadata'],
       customTools: [createMetadataTool(this)]
     })
+    this.metadataSession = child
     try {
+      if (this.stopped) return
       await child.prompt('Analyze this session and use the `metadata` tool to update its metadata.')
     } finally {
+      this.metadataSession = undefined
       child.session.dispose()
     }
+  }
+
+  async abort() {
+    this.stopped = true
+    await Promise.all([this.session.abort(), this.metadataSession?.abort()])
+    await this.postQueue
   }
 }
