@@ -1,5 +1,5 @@
 import { choice, TypeSafeClient } from '@typesafe-ai/sdk'
-import { routingInstructions, type RoutingBackend, type RoutingInput } from '.'
+import { isMostRecentResponse, routingInstructions, type RoutingBackend, type RoutingInput } from '.'
 
 export class TypeSafeRoutingBackend implements RoutingBackend {
   readonly name = 'typesafe'
@@ -16,7 +16,9 @@ export class TypeSafeRoutingBackend implements RoutingBackend {
         {
           title: session.metadata.title?.slice(0, 200) ?? '',
           summary: session.metadata.summary?.slice(0, 600) ?? '',
-          lastResponse: session.metadata.lastResponse?.slice(-1200) ?? ''
+          lastResponse: session.metadata.lastResponse?.slice(-1200) ?? '',
+          lastResponseAt: session.metadata.lastResponseAt ?? null,
+          mostRecentResponse: isMostRecentResponse(session, sessions)
         }
       ])
     )

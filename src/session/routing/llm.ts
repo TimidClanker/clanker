@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { ClankerSession } from '..'
-import { routingInstructions, type RoutingBackend, type RoutingInput } from '.'
+import { isMostRecentResponse, routingInstructions, type RoutingBackend, type RoutingInput } from '.'
 
 export class LLMRoutingBackend implements RoutingBackend {
   readonly name = 'llm'
@@ -37,7 +37,7 @@ ${JSON.stringify(LLMRoutingBackend.schema.toJSONSchema())}`,
       signal.throwIfAborted()
       const existingSessions = sessions.map(
         s =>
-          `- ID: ${s.id}\tTitle: ${s.metadata.title?.slice(0, 200)}\tKeywords: ${s.metadata.keywords?.join(', ').slice(0, 300)}\tLast assistant response: ${JSON.stringify(s.metadata.lastResponse?.slice(0, 4000) ?? '')}`
+          `- ID: ${s.id}\tTitle: ${s.metadata.title?.slice(0, 200)}\tKeywords: ${s.metadata.keywords?.join(', ').slice(0, 300)}\tLast assistant response at: ${s.metadata.lastResponseAt ?? 'unknown'}\tMost recent assistant response: ${isMostRecentResponse(s, sessions) ?? 'unknown'}\tLast assistant response: ${JSON.stringify(s.metadata.lastResponse?.slice(0, 4000) ?? '')}`
       )
       if (existingSessions.length === 0) existingSessions.push('There are no existing sessions.')
       await routing.prompt([

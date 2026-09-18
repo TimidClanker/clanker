@@ -23,6 +23,8 @@ export interface ClankerSessionMetadata {
   summary?: string
   /** The latest assistant response containing user-facing text. */
   lastResponse?: string
+  /** ISO timestamp of the latest assistant response containing user-facing text. */
+  lastResponseAt?: string
 }
 
 interface CreateClankerSession {
@@ -57,7 +59,10 @@ export class ClankerSession {
         .filter(content => content.type === 'text')
         .map(content => content.text)
         .join('\n')
-      if (text.trim()) this.metadata.lastResponse = text
+      if (text.trim()) {
+        this.metadata.lastResponse = text
+        this.metadata.lastResponseAt = new Date(event.message.timestamp).toISOString()
+      }
     })
   }
 
