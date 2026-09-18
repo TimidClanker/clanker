@@ -109,7 +109,7 @@ export class ClankerSession {
     snapshot: ReturnType<ClankerSession['snapshot']>,
     customTools?: CreateClankerSession['customTools']
   ) {
-    const path = `.data/sessions/${new Bun.CryptoHasher('sha256').update(id).digest('hex')}.jsonl`
+    const path = `workspace/sessions/${new Bun.CryptoHasher('sha256').update(id).digest('hex')}.jsonl`
     await Bun.write(path, snapshot.jsonl)
     const manager = SessionManager.open(path, undefined, process.cwd())
     if (snapshot.leafId) manager.branch(snapshot.leafId)

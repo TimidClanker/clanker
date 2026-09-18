@@ -12,7 +12,7 @@ export function describeAttachments(message: Message) {
 }
 
 export async function prepareAttachments(message: Message, signal: AbortSignal) {
-  const directory = resolve('.data/attachments', new Bun.CryptoHasher('sha256').update(JSON.stringify([message.threadId, message.id])).digest('hex'))
+  const directory = resolve('workspace/attachments', new Bun.CryptoHasher('sha256').update(JSON.stringify([message.threadId, message.id])).digest('hex'))
   const attachments = await Promise.all(
     message.attachments.map(async (attachment, index) => {
       signal.throwIfAborted()
