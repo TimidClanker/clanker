@@ -22,6 +22,8 @@ export interface ClankerSessionMetadata {
   keywords?: string[]
   /** A bullet list of meaningful actions in this session. */
   summary?: string
+  /** The latest accepted user message, including attachment descriptions. */
+  lastMessage?: string
   /** The latest assistant response containing user-facing text. */
   lastResponse?: string
   /** ISO timestamp of the latest assistant response containing user-facing text. */
@@ -43,7 +45,8 @@ interface CreateClankerSession {
 export class ClankerSession {
   public metadata: ClankerSessionMetadata
   private responseThread?: Thread
-  private prompting = false
+  private inputQueue: Promise<void> = Promise.resolve()
+  private promptTask?: Promise<void>
   private postQueue: Promise<void> = Promise.resolve()
   private stopped = false
   private metadataSession?: ClankerSession
@@ -54,6 +57,7 @@ export class ClankerSession {
     private readonly options: CreateClankerSession
   ) {
     this.metadata = { id }
+    session.agent.steeringMode = 'one-at-a-time'
     session.subscribe(event => {
       if (event.type !== 'message_end' || event.message.role !== 'assistant') return
       const text = event.message.content
@@ -146,11 +150,40 @@ export class ClankerSession {
     return model.model
   }
 
-  async prompt(text: (string | boolean | null)[] | string, options: Pick<PromptOptions, 'images'> = {}) {
-    if (this.stopped) throw new Error('Session is shutting down')
-    // Reserve the session before Pi's async preflight starts.
-    if (this.prompting || !this.session.isIdle) throw new Error('Session is busy. Please retry after the current response finishes.')
-    const prompt = Array.isArray(text) ? text.filter(Boolean).join('\n') : text
+  async prompt(text: (string | boolean | null)[] | string, options: Pick<PromptOptions, 'images'> & { onAccepted?: () => void } = {}) {
+    const previous = this.inputQueue
+    const accepted = Promise.withResolvers<void>()
+    this.inputQueue = accepted.promise
+    await previous
+    const onAccepted = () => {
+      options.onAccepted?.()
+      accepted.resolve()
+    }
+    try {
+      if (this.stopped) throw new Error('Session is shutting down')
+      const prompt = Array.isArray(text) ? text.filter(Boolean).join('\n') : text
+      if (this.session.isStreaming) {
+        // steer() also accepts messages during retries and automatic compaction.
+        const running = this.promptTask
+        await this.session.steer(prompt, options.images)
+        onAccepted()
+        await running
+        return
+      }
+
+      // The preceding run may still be posting its final response.
+      await this.promptTask?.catch(() => {})
+      await this.session.waitForIdle()
+      if (this.stopped) throw new Error('Session is shutting down')
+      this.promptTask = this.runPrompt(prompt, options, onAccepted)
+      await this.promptTask
+    } finally {
+      // Release preflight failures as well as successfully accepted messages.
+      accepted.resolve()
+    }
+  }
+
+  private async runPrompt(prompt: string, options: Pick<PromptOptions, 'images'>, onAccepted: () => void) {
     const thread = this.responseThread
     let typing: Promise<void> | undefined
     const updateTyping = () => {
@@ -162,15 +195,15 @@ export class ClankerSession {
           typing = undefined
         })
     }
-    this.prompting = true
     const typingTimer = thread ? setInterval(updateTyping, 5000).unref() : undefined
     try {
       updateTyping()
       await this.session.prompt(prompt, {
         images: options.images,
         // Abort can arrive during Pi's async preflight, before an agent run exists.
-        preflightResult: () => {
+        preflightResult: success => {
           if (this.stopped) throw new Error('Session is shutting down')
+          if (success) onAccepted()
         }
       })
     } finally {
@@ -178,7 +211,6 @@ export class ClankerSession {
       await typing
       await this.postQueue
       await thread?.adapter.endTyping?.(thread.id).catch(error => console.warn('[clanker] Unable to clear typing indicator', error))
-      this.prompting = false
     }
   }
 

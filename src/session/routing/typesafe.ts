@@ -17,6 +17,7 @@ export class TypeSafeRoutingBackend implements RoutingBackend {
         {
           title: session.metadata.title?.slice(0, 200) ?? '',
           summary: session.metadata.summary?.slice(0, 600) ?? '',
+          lastMessage: session.metadata.lastMessage?.slice(-1200) ?? '',
           lastResponse: session.metadata.lastResponse?.slice(-1200) ?? '',
           lastResponseAt: session.metadata.lastResponseAt ?? null,
           mostRecentResponse: isMostRecentResponse(session, sessions)

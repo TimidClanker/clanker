@@ -4,14 +4,15 @@ import { ClankerSession } from '.'
 import { SessionStore, type SavedSessionSummary } from '../storage/sessions'
 import { MemoryStore } from '../storage/memory'
 import { createMemoryTools } from './tools/memory'
-import { prepareAttachments } from './attachments'
+import { describeAttachments, prepareAttachments } from './attachments'
 import type { RoutingBackend, RoutingInput } from './routing'
 import { LLMRoutingBackend } from './routing/llm'
 import { TypeSafeRoutingBackend } from './routing/typesafe'
 
 type LiveSession = Omit<SavedSessionSummary, 'id' | 'metadata'> & {
   session: ClankerSession
-  busy: boolean
+  busy: number
+  metadataTask?: Promise<void>
   retire: boolean
 }
 
@@ -94,12 +95,17 @@ export class Orchestrator {
 
   protected handleIncomingMessage = (thread: Thread, message: Message) => {
     if (this.stopping) return Promise.resolve()
-    const task = this.routeMessage(thread, message).finally(() => this.pending.delete(task))
+    const accepted = Promise.withResolvers<void>()
+    const task = this.routeMessage(thread, message, accepted.resolve).finally(() => {
+      this.pending.delete(task)
+      // Failures before acceptance must also release the next incoming message.
+      accepted.resolve()
+    })
     this.pending.add(task)
-    return task
+    return accepted.promise
   }
 
-  private async routeMessage(thread: Thread, message: Message) {
+  private async routeMessage(thread: Thread, message: Message, onAccepted: () => void) {
     try {
       await this.withStorage(() => this.retireIdleSessions())
       const candidates = new Map((await this.store.list(thread.id, message.author.userId, Orchestrator.sessionLimit)).map(s => [s.id, s]))
@@ -115,7 +121,7 @@ export class Orchestrator {
       if (this.stopping) return
       const id = await this.selectSession({ threadId: thread.id, message, sessions: eligibleSessions })
       const live = await this.withStorage(() => this.acquireSession(id, thread, message))
-      if (live) await this.runSession(live, thread, message)
+      if (live) await this.runSession(live, thread, message, onAccepted)
     } catch (error) {
       console.error(error)
       if (!this.stopping) {
@@ -144,28 +150,29 @@ export class Orchestrator {
         ownerId: message.author.userId,
         createdAt: saved?.createdAt ?? now,
         lastActiveAt: saved?.lastActiveAt ?? now,
-        busy: false,
+        busy: 0,
         retire: false
       }
       this.sessions.set(session.id, live)
     }
     if (live.threadId !== thread.id || live.ownerId !== message.author.userId) throw new Error('Session belongs to another thread or owner')
     if (this.stopping) return
-    if (live.busy) throw new Error('Session is busy. Please retry after the current response finishes.')
-    live.busy = true
+    live.busy++
     live.lastActiveAt = new Date().toISOString()
     this.sessions.delete(live.session.id)
     this.sessions.set(live.session.id, live)
     return live
   }
 
-  private async runSession(live: LiveSession, thread: Thread, message: Message) {
+  private async runSession(live: LiveSession, thread: Thread, message: Message, onAccepted: () => void) {
     const { session } = live
     try {
       if (this.stopping) return
       await session.attach(thread)
       if (this.stopping) return
       const { files, images } = await prepareAttachments(message, this.routingAbort.signal)
+      // Finish an existing metadata snapshot before starting another agent run.
+      await live.metadataTask
       if (this.stopping) return
       await session.prompt(
         [
@@ -176,13 +183,23 @@ export class Orchestrator {
           files.length > 0 &&
             `Attachments:\n${JSON.stringify(files)}\nImages marked inlineImage are included in the same order. Use your tools to read the saved files at their local paths.`
         ],
-        { images }
+        {
+          images,
+          onAccepted: () => {
+            session.metadata.lastMessage = [message.text, message.attachments.length > 0 && `Attachments: ${JSON.stringify(describeAttachments(message))}`]
+              .filter(Boolean)
+              .join('\n')
+            onAccepted()
+          }
+        }
       )
-      if (!this.stopping) {
-        await session.updateMetadata().catch(error => console.error(`[clanker] Unable to update metadata for ${session.id}`, error))
+      if (!this.stopping && live.busy === 1) {
+        live.metadataTask = session.updateMetadata().catch(error => console.error(`[clanker] Unable to update metadata for ${session.id}`, error))
+        await live.metadataTask
+        live.metadataTask = undefined
       }
     } finally {
-      live.busy = false
+      live.busy--
       if (!this.stopping) await this.withStorage(() => this.retireIdleSessions())
     }
   }

@@ -19,6 +19,8 @@ async function main() {
       ...registerAdapter('discord', 'DISCORD_BOT_TOKEN', createDiscordAdapter)
     },
     state: createMemoryState(),
+    // Admit every message in FIFO order; handlers release once Pi accepts it.
+    concurrency: { strategy: 'concurrent', maxConcurrent: 1 },
     logger: 'info'
   })
   cleanup.defer(() => io.shutdown())
