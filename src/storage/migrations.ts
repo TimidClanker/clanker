@@ -17,6 +17,41 @@ export const migrations: ((sql: TransactionSQL) => Promise<void>)[] = [
       )
     `
     await sql`CREATE INDEX IF NOT EXISTS sessions_routing ON sessions (thread_id, owner_id, last_active_at)`
+  },
+  async sql => {
+    await sql`
+      CREATE TABLE memory_boards (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL,
+        author_session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    `
+    await sql`
+      CREATE TABLE memory_posts (
+        id TEXT PRIMARY KEY,
+        board_id TEXT NOT NULL REFERENCES memory_boards(id),
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        author_session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_active_at TEXT NOT NULL
+      )
+    `
+    await sql`
+      CREATE TABLE memory_replies (
+        id TEXT PRIMARY KEY,
+        post_id TEXT NOT NULL REFERENCES memory_posts(id),
+        body TEXT NOT NULL,
+        author_session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    `
+    await sql`CREATE INDEX memory_posts_board_activity ON memory_posts (board_id, last_active_at, id)`
+    await sql`CREATE INDEX memory_posts_activity ON memory_posts (last_active_at, id)`
+    await sql`CREATE INDEX memory_replies_thread ON memory_replies (post_id, created_at, id)`
   }
 ]
 

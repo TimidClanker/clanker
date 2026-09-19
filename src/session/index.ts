@@ -114,7 +114,11 @@ export class ClankerSession {
     const manager = SessionManager.open(path, undefined, process.cwd())
     if (snapshot.leafId) manager.branch(snapshot.leafId)
     else manager.resetLeaf()
-    const session = await ClankerSession.create(id, { ...snapshot.settings, customTools }, manager)
+    // Reattach runtime tools to older allowlists, preserving an explicit empty list.
+    const tools = snapshot.settings.tools?.length
+      ? [...new Set([...snapshot.settings.tools, ...(customTools ?? []).map(tool => tool.name)])]
+      : snapshot.settings.tools
+    const session = await ClankerSession.create(id, { ...snapshot.settings, tools, customTools }, manager)
     session.metadata = metadata
     return session
   }

@@ -2,6 +2,8 @@ import type { Chat, Thread, Message } from 'chat'
 
 import { ClankerSession } from '.'
 import { SessionStore, type SavedSessionSummary } from '../storage/sessions'
+import { MemoryStore } from '../storage/memory'
+import { createMemoryTools } from './tools/memory'
 import { prepareAttachments } from './attachments'
 import type { RoutingBackend, RoutingInput } from './routing'
 import { LLMRoutingBackend } from './routing/llm'
@@ -27,6 +29,7 @@ export class Orchestrator {
   protected constructor(
     private backends: RoutingBackend[],
     private store: SessionStore,
+    private memoryStore: MemoryStore,
     chat: Chat
   ) {
     chat.onNewMention(this.handleIncomingMessage)
@@ -36,13 +39,13 @@ export class Orchestrator {
     process.on('memoryPressure', this.handleMemoryPressure)
   }
 
-  static async initialize(chat: Chat, store: SessionStore) {
+  static async initialize(chat: Chat, store: SessionStore, memoryStore: MemoryStore) {
     const apiKey = process.env.TYPESAFE_API_KEY?.trim()
     const backends: RoutingBackend[] = [...(apiKey ? [new TypeSafeRoutingBackend(apiKey)] : []), new LLMRoutingBackend()]
     try {
       await chat.initialize()
       for (const threadId of await store.threads()) await chat.thread(threadId).subscribe()
-      return new Orchestrator(backends, store, chat)
+      return new Orchestrator(backends, store, memoryStore, chat)
     } catch (error) {
       for (const backend of backends) backend.dispose?.()
       throw error
@@ -126,11 +129,13 @@ export class Orchestrator {
     let live = id ? this.sessions.get(id) : undefined
     if (!live) {
       const saved = id ? await this.store.load(id, thread.id, message.author.userId) : undefined
+      const customTools = createMemoryTools(this.memoryStore)
       const session = saved
-        ? await ClankerSession.restore(saved.id, saved.metadata, saved.snapshot)
-        : await ClankerSession.create(`${thread.id}:${crypto.randomUUID()}`, {
+        ? await ClankerSession.restore(saved.id, saved.metadata, saved.snapshot, customTools)
+        : await ClankerSession.create(`${thread.id}:${Bun.randomUUIDv7()}`, {
             model: process.env.DEFAULT_MODEL?.trim() || 'gpt-5.6-sol',
-            thinkingLevel: 'low'
+            thinkingLevel: 'low',
+            customTools
           })
       const now = new Date().toISOString()
       live = {
