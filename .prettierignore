@@ -4,3 +4,4 @@ dist
 out
 coverage
 tsconfig.json
+.agents/skills/
