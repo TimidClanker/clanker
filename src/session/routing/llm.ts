@@ -16,7 +16,6 @@ export class LLMRoutingBackend implements RoutingBackend {
       this.session ??
       (await (this.initializing ??= ClankerSession.create('orchestrator', {
         model: process.env.ORCHESTRATOR_MODEL?.trim() || 'gpt-5.6-luna',
-        thinkingLevel: 'low',
         system: `You are an orchestration layer that routes user input to an appropriate agent session.
 
 ${routingInstructions}

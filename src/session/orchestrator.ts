@@ -140,7 +140,6 @@ export class Orchestrator {
         ? await ClankerSession.restore(saved.id, saved.metadata, saved.snapshot, customTools)
         : await ClankerSession.create(`${thread.id}:${Bun.randomUUIDv7()}`, {
             model: process.env.DEFAULT_MODEL?.trim() || 'gpt-5.6-sol',
-            thinkingLevel: 'low',
             customTools
           })
       const now = new Date().toISOString()

@@ -72,14 +72,14 @@ export class ClankerSession {
   }
 
   static async create(id: string, options: CreateClankerSession = {}, manager?: SessionManager): Promise<ClankerSession> {
-    const model = await ClankerSession.getModel(options?.model)
+    const { model, thinkingLevel } = await ClankerSession.getModel(options.model)
     if (!model) throw new Error('No available models')
 
     const resourceLoader = await ClankerSession.getResourceLoader(options.system)
 
     const { session } = await createAgentSession({
       model,
-      thinkingLevel: options?.thinkingLevel,
+      thinkingLevel: options.thinkingLevel ?? thinkingLevel ?? 'low',
       resourceLoader,
       tools: options.noTools ? [] : options.tools,
       customTools: options.customTools,
@@ -141,13 +141,13 @@ export class ClankerSession {
     const modelRuntime = await ModelRuntime.create({ allowModelNetwork: true, modelRefreshTimeoutMs: 15 * 1000 })
     if (!modelName) {
       const available = await modelRuntime.getAvailable()
-      return available[0] ?? null
+      return { model: available[0], thinkingLevel: undefined }
     }
 
     const model = resolveCliModel({ cliModel: modelName, modelRuntime })
     if (model.error) throw new Error(model.error)
     if (model.warning) console.log(`Model resolution warning: ${model.warning}`)
-    return model.model
+    return { model: model.model, thinkingLevel: model.thinkingLevel }
   }
 
   async prompt(text: (string | boolean | null)[] | string, options: Pick<PromptOptions, 'images'> & { onAccepted?: () => void } = {}) {
@@ -268,11 +268,13 @@ export class ClankerSession {
     }
     const forkId = manager.getSessionId()
 
-    const model = options?.model ? await ClankerSession.getModel(options?.model) : this.session.model
+    const { model, thinkingLevel } = options.model
+      ? await ClankerSession.getModel(options.model)
+      : { model: this.session.model, thinkingLevel: this.session.thinkingLevel }
 
     const { session } = await createAgentSession({
       model: model!,
-      thinkingLevel: options?.thinkingLevel ?? this.session.thinkingLevel,
+      thinkingLevel: options.thinkingLevel ?? thinkingLevel ?? this.session.thinkingLevel,
       // Loaders own extension state, so each session needs its own lifetime.
       resourceLoader: await ClankerSession.getResourceLoader(options.system),
       sessionManager: manager,
@@ -288,8 +290,7 @@ export class ClankerSession {
     if (this.stopped) return
     const child = await this.fork({
       ephemeral: true,
-      model: 'gpt-5.6-luna',
-      thinkingLevel: 'low',
+      model: process.env.METADATA_MODEL?.trim() || process.env.ORCHESTRATOR_MODEL?.trim() || undefined,
       noTools: false,
       tools: ['metadata'],
       customTools: [createMetadataTool(this)]
