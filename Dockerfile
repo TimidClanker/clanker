@@ -8,7 +8,7 @@ RUN bun install --frozen-lockfile --production
 FROM oven/bun:${BUN_VERSION} AS runtime
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl git ripgrep tini jq python3 file unzip zip \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl git ripgrep tini jq python3 file unzip zip gh \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

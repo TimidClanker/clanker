@@ -8,6 +8,7 @@ import { Orchestrator } from './session/orchestrator'
 import { initializeDatabase } from './storage'
 import { SessionStore } from './storage/sessions'
 import { MemoryStore } from './storage/memory'
+import { UserStore } from './storage/users'
 
 async function main() {
   await using sql = await initializeDatabase()
@@ -29,7 +30,7 @@ async function main() {
   for (const event of ['SIGINT', 'SIGTERM', 'beforeExit'] as const) process.once(event, () => gateway.abort())
 
   // Restore subscriptions before accepting gateway events.
-  const orchestrator = await Orchestrator.initialize(io, new SessionStore(sql), new MemoryStore(sql))
+  const orchestrator = await Orchestrator.initialize(io, new SessionStore(sql), new MemoryStore(sql), new UserStore(sql))
   cleanup.defer(() => orchestrator.shutdown())
   gateway.signal.addEventListener(
     'abort',

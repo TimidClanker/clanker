@@ -1,9 +1,11 @@
 import type { Chat, Thread, Message } from 'chat'
 
 import { ClankerSession } from '.'
-import { SessionStore, type SavedSessionSummary } from '../storage/sessions'
+import { SessionStore, type SavedSessionSummary, type SessionIdentity } from '../storage/sessions'
 import { MemoryStore } from '../storage/memory'
 import { createMemoryTools } from './tools/memory'
+import { createUserTools } from './tools/users'
+import { UserStore } from '../storage/users'
 import { describeAttachments, prepareAttachments } from './attachments'
 import type { RoutingBackend, RoutingInput } from './routing'
 import { LLMRoutingBackend } from './routing/llm'
@@ -14,6 +16,7 @@ type LiveSession = Omit<SavedSessionSummary, 'id' | 'metadata'> & {
   busy: number
   metadataTask?: Promise<void>
   retire: boolean
+  context?: { thread: Thread; message: Message }
 }
 
 export class Orchestrator {
@@ -31,6 +34,7 @@ export class Orchestrator {
     private backends: RoutingBackend[],
     private store: SessionStore,
     private memoryStore: MemoryStore,
+    private userStore: UserStore,
     chat: Chat
   ) {
     chat.onNewMention(this.handleIncomingMessage)
@@ -40,13 +44,13 @@ export class Orchestrator {
     process.on('memoryPressure', this.handleMemoryPressure)
   }
 
-  static async initialize(chat: Chat, store: SessionStore, memoryStore: MemoryStore) {
+  static async initialize(chat: Chat, store: SessionStore, memoryStore: MemoryStore, userStore: UserStore) {
     const apiKey = process.env.TYPESAFE_API_KEY?.trim()
     const backends: RoutingBackend[] = [...(apiKey ? [new TypeSafeRoutingBackend(apiKey)] : []), new LLMRoutingBackend()]
     try {
       await chat.initialize()
       for (const threadId of await store.threads()) await chat.thread(threadId).subscribe()
-      return new Orchestrator(backends, store, memoryStore, chat)
+      return new Orchestrator(backends, store, memoryStore, userStore, chat)
     } catch (error) {
       for (const backend of backends) backend.dispose?.()
       throw error
@@ -107,17 +111,18 @@ export class Orchestrator {
 
   private async routeMessage(thread: Thread, message: Message, onAccepted: () => void) {
     try {
-      await this.withStorage(() => this.retireIdleSessions())
-      const candidates = new Map((await this.store.list(thread.id, message.author.userId, Orchestrator.sessionLimit)).map(s => [s.id, s]))
-      // The model can select work, but cannot change its owner or audience.
-      for (const live of this.sessions.values()) {
-        if (live.threadId === thread.id && live.ownerId === message.author.userId) {
-          candidates.set(live.session.id, this.summarize(live))
+      const eligibleSessions = await this.withStorage(async () => {
+        await this.retireIdleSessions()
+        const identity = await this.identity(thread, message)
+        const candidates = new Map((await this.store.list(thread.id, identity, Orchestrator.sessionLimit)).map(s => [s.id, s]))
+        // The model can select work, but cannot change its owner or audience.
+        for (const live of this.sessions.values()) {
+          if (live.threadId === thread.id && this.owns(live, identity)) candidates.set(live.session.id, this.summarize(live))
         }
-      }
-      const eligibleSessions = [...candidates.values()]
-        .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt) || b.id.localeCompare(a.id))
-        .slice(0, Orchestrator.sessionLimit)
+        return [...candidates.values()]
+          .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt) || b.id.localeCompare(a.id))
+          .slice(0, Orchestrator.sessionLimit)
+      })
       if (this.stopping) return
       const id = await this.selectSession({ threadId: thread.id, message, sessions: eligibleSessions })
       const live = await this.withStorage(() => this.acquireSession(id, thread, message))
@@ -132,13 +137,15 @@ export class Orchestrator {
 
   private async acquireSession(id: string | undefined, thread: Thread, message: Message) {
     if (this.stopping) return
+    const identity = await this.identity(thread, message)
     let live = id ? this.sessions.get(id) : undefined
     if (!live) {
-      const saved = id ? await this.store.load(id, thread.id, message.author.userId) : undefined
-      const customTools = createMemoryTools(this.memoryStore)
+      const saved = id ? await this.store.load(id, identity, thread.id) : undefined
+      const sessionId = saved?.id ?? `${thread.id}:${Bun.randomUUIDv7()}`
+      const customTools = this.createTools(sessionId)
       const session = saved
         ? await ClankerSession.restore(saved.id, saved.metadata, saved.snapshot, customTools)
-        : await ClankerSession.create(`${thread.id}:${Bun.randomUUIDv7()}`, {
+        : await ClankerSession.create(sessionId, {
             model: process.env.DEFAULT_MODEL?.trim() || 'gpt-5.6-sol',
             customTools
           })
@@ -146,7 +153,9 @@ export class Orchestrator {
       live = {
         session,
         threadId: thread.id,
-        ownerId: message.author.userId,
+        adapter: saved?.adapter ?? identity.adapter,
+        ownerId: saved?.ownerId ?? identity.platformUserId,
+        userId: identity.userId,
         createdAt: saved?.createdAt ?? now,
         lastActiveAt: saved?.lastActiveAt ?? now,
         busy: 0,
@@ -154,7 +163,7 @@ export class Orchestrator {
       }
       this.sessions.set(session.id, live)
     }
-    if (live.threadId !== thread.id || live.ownerId !== message.author.userId) throw new Error('Session belongs to another thread or owner')
+    if (live.threadId !== thread.id || !this.owns(live, identity)) throw new Error('Session belongs to another thread or owner')
     if (this.stopping) return
     live.busy++
     live.lastActiveAt = new Date().toISOString()
@@ -178,12 +187,18 @@ export class Orchestrator {
           `You received this message:`,
           `Thread ID: ${thread.id}`,
           `Sender: ${JSON.stringify(message.author)}`,
+          `Persistent user ID: ${(await this.identity(thread, message)).userId ?? 'none (registration is optional)'}`,
+          `Conversation: ${thread.isDM ? 'private chat' : 'shared conversation'}`,
           `Message:\n${message.text}`,
           files.length > 0 &&
             `Attachments:\n${JSON.stringify(files)}\nImages marked inlineImage are included in the same order. Use your tools to read the saved files at their local paths.`
         ],
         {
           images,
+          contextKey: JSON.stringify([thread.adapter.name, message.author.userId]),
+          onStart: () => {
+            live.context = { thread, message }
+          },
           onAccepted: () => {
             session.metadata.lastMessage = [message.text, message.attachments.length > 0 && `Attachments: ${JSON.stringify(describeAttachments(message))}`]
               .filter(Boolean)
@@ -203,8 +218,61 @@ export class Orchestrator {
     }
   }
 
-  private summarize({ session, threadId, ownerId, createdAt, lastActiveAt }: LiveSession): SavedSessionSummary {
-    return { id: session.id, threadId, ownerId, createdAt, lastActiveAt, metadata: session.metadata }
+  private async identity(thread: Thread, message: Message): Promise<SessionIdentity> {
+    const connection = { adapter: thread.adapter.name, platformUserId: message.author.userId }
+    return { ...connection, userId: (await this.userStore.resolve(connection))?.id ?? null }
+  }
+
+  private owns(session: Omit<SavedSessionSummary, 'id' | 'metadata'>, identity: SessionIdentity) {
+    return identity.userId
+      ? session.userId === identity.userId
+      : session.userId === null && session.adapter === identity.adapter && session.ownerId === identity.platformUserId
+  }
+
+  private createTools(sessionId: string) {
+    const context = () => this.sessions.get(sessionId)!.context!
+    const identity = () => {
+      const { thread, message } = context()
+      return this.identity(thread, message)
+    }
+    const accountIdentity = async () => {
+      if (!context().thread.isDM) throw new Error('Account management is only available in private chats')
+      return identity()
+    }
+    const requireUser = async () => {
+      const actor = await accountIdentity()
+      if (!actor.userId) throw new Error('Create or link an account first')
+      return { ...actor, userId: actor.userId }
+    }
+    const connect = async (code?: string) => {
+      const actor = await accountIdentity()
+      return this.withStorage(async () => {
+        const user = code === undefined ? await this.userStore.enroll(actor) : await this.userStore.redeemLink(actor, code)
+        for (const live of this.sessions.values()) {
+          if (live.userId === null && live.adapter === actor.adapter && live.ownerId === actor.platformUserId) {
+            live.userId = user.id
+            await this.save(live)
+          }
+        }
+        return user
+      })
+    }
+    return [
+      ...createMemoryTools(async () => this.memoryStore.forUser((await identity()).userId)),
+      ...createUserTools({
+        enroll: () => connect(),
+        redeemLink: code => connect(code),
+        connections: async () => {
+          const actor = await requireUser()
+          return { userId: actor.userId, connections: await this.userStore.connections(actor.userId) }
+        },
+        issueLink: async () => this.userStore.issueLink((await requireUser()).userId)
+      })
+    ]
+  }
+
+  private summarize({ session, threadId, adapter, ownerId, userId, createdAt, lastActiveAt }: LiveSession): SavedSessionSummary {
+    return { id: session.id, threadId, adapter, ownerId, userId, createdAt, lastActiveAt, metadata: session.metadata }
   }
 
   private save(live: LiveSession) {

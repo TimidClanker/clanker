@@ -1,7 +1,8 @@
 import type { SQL } from 'bun'
 import { withDatabase } from '.'
 
-type Board = { id: string; name: string; description: string; authorSessionId: string; createdAt: string }
+type Scope = 'shared' | 'personal' | 'all'
+type Board = { scope: 'shared' | 'personal'; id: string; name: string; description: string; authorSessionId: string; createdAt: string }
 type Post = {
   id: string
   boardId: string
@@ -29,39 +30,60 @@ function required(value: string, field: string) {
 }
 
 export class MemoryStore {
-  constructor(private sql: SQL) {}
+  constructor(
+    private sql: SQL,
+    private userId: string | null = null
+  ) {}
 
-  async listBoards(options: Pagination = {}) {
+  forUser(userId: string | null) {
+    return new MemoryStore(this.sql, userId)
+  }
+
+  private requireScope(scope: Scope) {
+    if (scope === 'personal' && !this.userId) throw new Error('Create or link an account before using personal memory')
+  }
+
+  async listBoards(options: Pagination & { scope?: Scope } = {}) {
+    const scope = options.scope ?? 'all'
+    this.requireScope(scope)
     return withDatabase(this.sql, async () => {
       const { limit, offset } = pagination(options)
       const rows = await this.sql<Board[]>`
-        SELECT id, name, description, author_session_id AS "authorSessionId", created_at AS "createdAt"
-        FROM memory_boards ORDER BY normalized_name, id LIMIT ${limit + 1} OFFSET ${offset}
+        SELECT id, name, description, author_session_id AS "authorSessionId", created_at AS "createdAt",
+               CASE WHEN user_id IS NULL THEN 'shared' ELSE 'personal' END AS scope
+        FROM memory_boards
+        WHERE (user_id IS NULL OR user_id = ${this.userId})
+          AND (${scope !== 'personal'} OR user_id = ${this.userId})
+          AND (${scope !== 'shared'} OR user_id IS NULL)
+        ORDER BY normalized_name, id LIMIT ${limit + 1} OFFSET ${offset}
       `
       return page(rows, limit)
     })
   }
 
-  async createBoard(name: string, description: string, authorSessionId: string) {
+  async createBoard(name: string, description: string, authorSessionId: string, scope: Exclude<Scope, 'all'> = 'shared') {
+    this.requireScope(scope)
+    const owner = scope === 'personal' ? this.userId : null
     return withDatabase(this.sql, async () => {
       name = required(name, 'Board name').trim()
       required(description, 'Board description')
       const normalizedName = name.toLowerCase()
       await this.sql`
-        INSERT INTO memory_boards (id, name, normalized_name, description, author_session_id, created_at)
-        VALUES (${Bun.randomUUIDv7()}, ${name}, ${normalizedName}, ${description}, ${authorSessionId}, ${new Date().toISOString()})
-        ON CONFLICT (normalized_name) DO NOTHING
+        INSERT INTO memory_boards (id, user_id, name, normalized_name, description, author_session_id, created_at)
+        VALUES (${Bun.randomUUIDv7()}, ${owner}, ${name}, ${normalizedName}, ${description}, ${authorSessionId}, ${new Date().toISOString()})
+        ON CONFLICT DO NOTHING
       `
       const [board] = await this.sql<Board[]>`
-        SELECT id, name, description, author_session_id AS "authorSessionId", created_at AS "createdAt"
-        FROM memory_boards WHERE normalized_name = ${normalizedName}
+        SELECT id, name, description, author_session_id AS "authorSessionId", created_at AS "createdAt",
+               CASE WHEN user_id IS NULL THEN 'shared' ELSE 'personal' END AS scope
+        FROM memory_boards WHERE normalized_name = ${normalizedName} AND COALESCE(user_id, '') = ${owner ?? ''}
       `
       return board!
     })
   }
 
   private async requireBoard(id: string) {
-    const [board] = await this.sql`SELECT id FROM memory_boards WHERE id = ${id}`
+    const [board] = await this.sql`SELECT id FROM memory_boards WHERE id = ${id} AND (user_id IS NULL OR user_id = ${this.userId})`
     if (!board) throw new Error(`Memory board ${id} was not found`)
   }
 
@@ -70,6 +92,7 @@ export class MemoryStore {
       SELECT id, board_id AS "boardId", title, body, author_session_id AS "authorSessionId",
              created_at AS "createdAt", last_active_at AS "lastActiveAt"
       FROM memory_posts WHERE id = ${id}
+        AND board_id IN (SELECT id FROM memory_boards WHERE user_id IS NULL OR user_id = ${this.userId})
     `
     if (!post) throw new Error(`Memory post ${id} was not found`)
     return post
@@ -126,21 +149,27 @@ export class MemoryStore {
     return this.findPosts('', boardId, options)
   }
 
-  search(query: string, boardId?: string, options: Pagination = {}) {
+  search(query: string, boardId?: string, options: Pagination & { scope?: Scope } = {}) {
     return this.findPosts(required(query, 'Search query'), boardId, options)
   }
 
-  private async findPosts(query: string, boardId: string | undefined, options: Pagination) {
+  private async findPosts(query: string, boardId: string | undefined, options: Pagination & { scope?: Scope }) {
+    const scope = options.scope ?? 'all'
+    this.requireScope(scope)
     return withDatabase(this.sql, async () => {
       const { limit, offset } = pagination(options)
       if (boardId !== undefined) await this.requireBoard(boardId)
       // Treat LIKE wildcards as literal search text.
       const pattern = `%${query.toLowerCase().replace(/[!%_]/g, '!$&')}%`
-      const rows = await this.sql<(Omit<Post, 'body'> & { preview: string })[]>`
+      const rows = await this.sql<(Omit<Post, 'body'> & { preview: string; scope: 'shared' | 'personal' })[]>`
         SELECT p.id, p.board_id AS "boardId", p.title, SUBSTR(p.body, 1, 240) AS preview,
-               p.author_session_id AS "authorSessionId", p.created_at AS "createdAt", p.last_active_at AS "lastActiveAt"
-        FROM memory_posts p
+               p.author_session_id AS "authorSessionId", p.created_at AS "createdAt", p.last_active_at AS "lastActiveAt",
+               CASE WHEN b.user_id IS NULL THEN 'shared' ELSE 'personal' END AS scope
+        FROM memory_posts p JOIN memory_boards b ON b.id = p.board_id
         WHERE (${boardId === undefined} OR p.board_id = ${boardId ?? ''})
+          AND (b.user_id IS NULL OR b.user_id = ${this.userId})
+          AND (${scope !== 'personal'} OR b.user_id = ${this.userId})
+          AND (${scope !== 'shared'} OR b.user_id IS NULL)
           AND (LOWER(p.title) LIKE ${pattern} ESCAPE '!' OR LOWER(p.body) LIKE ${pattern} ESCAPE '!'
             OR EXISTS (SELECT 1 FROM memory_replies r WHERE r.post_id = p.id AND LOWER(r.body) LIKE ${pattern} ESCAPE '!'))
         ORDER BY p.last_active_at DESC, p.id DESC LIMIT ${limit + 1} OFFSET ${offset}

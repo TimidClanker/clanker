@@ -17,6 +17,7 @@ export function withDatabase<T>(sql: SQL, action: () => Promise<T>): Promise<T> 
 export async function initializeDatabase(url = process.env.DATABASE_URL ?? 'sqlite://./clanker.sqlite') {
   const sql = new SQL(url)
   try {
+    if (sql.options.adapter === 'sqlite') await sql`PRAGMA foreign_keys = ON`
     await migrate(sql)
     return sql
   } catch (error) {

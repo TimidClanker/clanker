@@ -45,6 +45,7 @@ interface CreateClankerSession {
 export class ClankerSession {
   public metadata: ClankerSessionMetadata
   private responseThread?: Thread
+  private contextKey?: string
   private inputQueue: Promise<void> = Promise.resolve()
   private promptTask?: Promise<void>
   private postQueue: Promise<void> = Promise.resolve()
@@ -68,6 +69,15 @@ export class ClankerSession {
         this.metadata.lastResponse = text
         this.metadata.lastResponseAt = new Date(event.message.timestamp).toISOString()
       }
+      const thread = this.responseThread
+      if (!thread) return
+      const response = event.message
+      // Pi does not await listeners; drain ordered posts before releasing the prompt.
+      this.postQueue = this.postQueue
+        .then(async () => {
+          for (const content of response.content.filter(c => c.type === 'text')) await thread.post(content.text)
+        })
+        .catch(error => console.error(`[clanker] Unable to post response for ${this.id} to ${thread.id}`, error))
     })
   }
 
@@ -150,7 +160,10 @@ export class ClankerSession {
     return { model: model.model, thinkingLevel: model.thinkingLevel }
   }
 
-  async prompt(text: (string | boolean | null)[] | string, options: Pick<PromptOptions, 'images'> & { onAccepted?: () => void } = {}) {
+  async prompt(
+    text: (string | boolean | null)[] | string,
+    options: Pick<PromptOptions, 'images'> & { onAccepted?: () => void; contextKey?: string; onStart?: () => void } = {}
+  ) {
     const previous = this.inputQueue
     const accepted = Promise.withResolvers<void>()
     this.inputQueue = accepted.promise
@@ -162,7 +175,7 @@ export class ClankerSession {
     try {
       if (this.stopped) throw new Error('Session is shutting down')
       const prompt = Array.isArray(text) ? text.filter(Boolean).join('\n') : text
-      if (this.session.isStreaming) {
+      if (this.session.isStreaming && this.contextKey === options.contextKey) {
         // steer() also accepts messages during retries and automatic compaction.
         const running = this.promptTask
         await this.session.steer(prompt, options.images)
@@ -175,6 +188,8 @@ export class ClankerSession {
       await this.promptTask?.catch(() => {})
       await this.session.waitForIdle()
       if (this.stopped) throw new Error('Session is shutting down')
+      this.contextKey = options.contextKey
+      options.onStart?.()
       this.promptTask = this.runPrompt(prompt, options, onAccepted)
       await this.promptTask
     } finally {
@@ -225,17 +240,6 @@ export class ClankerSession {
     console.log(`[clanker] Attaching ${thread.id} to session ${this.id}`)
     await thread.subscribe()
     this.responseThread = thread
-
-    this.session.subscribe(event => {
-      if (event.type !== 'message_end' || event.message.role !== 'assistant') return
-      const response = event.message
-      // Pi does not await listeners; drain ordered posts before releasing the prompt.
-      this.postQueue = this.postQueue
-        .then(async () => {
-          for (const content of response.content.filter(c => c.type === 'text')) await thread.post(content.text)
-        })
-        .catch(error => console.error(`[clanker] Unable to post response for ${this.id} to ${thread.id}`, error))
-    })
   }
 
   async fork(options: CreateClankerSession = {}) {
