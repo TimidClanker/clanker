@@ -12,8 +12,10 @@ import {
   Harness,
   section,
   type ConversationId,
+  type EntryId,
   type ModelRef,
   type Storage,
+  type SubmissionId,
   type TaskId
 } from '@earendil-works/pi-durable'
 import type { Chat, Message, Thread } from 'chat'
@@ -30,7 +32,7 @@ const Threads = defineDoc<{ threads: Record<string, ConversationId> }>({
   initial: () => ({ threads: {} })
 })
 
-const Messages = defineDoc<{ received: Record<string, TaskId>; lastTask: TaskId | null }>({
+const Messages = defineDoc<{ received: Record<string, TaskId>; lastTask: TaskId | null; lastAnswer?: EntryId }>({
   kind: 'clanker.messages',
   version: 1,
   scope: 'conversation',
@@ -49,7 +51,7 @@ export async function connectBot(
 ) {
   const Reply = defineTask<
     { threadId: string; messageId: string; text: string; images?: ImageContent[]; previous: TaskId | null },
-    { phase: 'queue' } | { phase: 'answer' } | { phase: 'send'; text: string },
+    { phase: 'queue' } | { phase: 'answer'; submission: SubmissionId } | { phase: 'send'; text: string; answer?: EntryId },
     null
   >({
     name: 'clanker.reply',
@@ -57,28 +59,40 @@ export async function connectBot(
     initial: () => ({ phase: 'queue' }),
     phases: {
       queue: async (task, runtime, ctx) => {
-        // Serialize the entire exchange per thread, including Discord delivery, across restarts.
-        await runtime.commit(
-          () => ({ status: 'waiting', checkpoint: { phase: 'answer' }, on: task.input.previous ? [task.input.previous] : [], policy: 'allSettled' }),
-          ctx
-        )
-      },
-      answer: async (task, runtime, ctx) => {
-        using typing = showTyping(chat.thread(task.input.threadId))
+        // Admit input before waiting for earlier replies, so it can steer an active run.
         const conversation = (await runtime.conversation(runtime.conversationId, ctx))!
         const submission = await conversation.submit(
           {
             type: 'input',
             content: task.input.images?.length ? [{ type: 'text', text: task.input.text }, ...task.input.images] : task.input.text,
-            requestId: task.input.messageId
+            requestId: task.input.messageId,
+            whenBusy: 'steer'
           },
           ctx
         )
+        // Only delivery is serialized. requestId makes admission safe to repeat after a restart.
+        await runtime.commit(
+          () => ({
+            status: 'waiting',
+            checkpoint: { phase: 'answer', submission: submission.id },
+            on: task.input.previous ? [task.input.previous] : [],
+            policy: 'allSettled'
+          }),
+          ctx
+        )
+      },
+      answer: async (task, runtime, ctx) => {
+        using typing = showTyping(chat.thread(task.input.threadId))
+        const submission = (await harness.submission(task.state.checkpoint.submission, ctx))!
         const settled = await submission.wait(ctx)
         if (settled.status === 'unanswered') console.error('[clanker] Unanswered message', settled)
         await runtime.commit(async tx => {
           let text = 'Sorry, I could not generate a response. Please try again.'
           if (settled.status === 'done' && settled.type === 'input') {
+            // Several steers can share an answer. Deliver each distinct answer once, in order.
+            if ((await tx.doc(Messages, runtime.conversationId)).lastAnswer === settled.answer) {
+              return { status: 'terminal', outcome: { status: 'completed', result: null } }
+            }
             const entry = await tx.entry(AssistantEntry, settled.answer)
             const answer = entry!.model![0] as AssistantMessage
             text =
@@ -87,7 +101,10 @@ export async function connectBot(
                 .join('\n')
                 .trim() || text
           }
-          return { status: 'running', checkpoint: { phase: 'send', text } }
+          return {
+            status: 'running',
+            checkpoint: { phase: 'send', text, ...(settled.status === 'done' && settled.type === 'input' ? { answer: settled.answer } : {}) }
+          }
         }, ctx)
       },
       send: async (task, runtime, ctx) => {
@@ -97,13 +114,14 @@ export async function connectBot(
         ctx.abortSignal?.throwIfAborted()
         // A crash after Discord accepts a post but before this checkpoint can repeat that chunk.
         await chat.thread(task.input.threadId).post({ raw: text.slice(0, end) })
-        await runtime.commit(
-          () =>
-            text.length > end
-              ? { status: 'running', checkpoint: { phase: 'send', text: text.slice(end) } }
-              : { status: 'terminal', outcome: { status: 'completed', result: null } },
-          ctx
-        )
+        await runtime.commit(async tx => {
+          if (text.length > end) return { status: 'running', checkpoint: { ...task.state.checkpoint, text: text.slice(end) } }
+          if (task.state.checkpoint.answer !== undefined) {
+            const messages = await tx.doc(Messages, runtime.conversationId)
+            messages.lastAnswer = task.state.checkpoint.answer
+          }
+          return { status: 'terminal', outcome: { status: 'completed', result: null } }
+        }, ctx)
       }
     },
     abort: async (_task, runtime, ctx) => {
@@ -125,6 +143,7 @@ export async function connectBot(
           () =>
             [
               'You are Clanker, a helpful Discord assistant. Reply clearly and concisely.',
+              'When several user messages arrive before your reply, address them together. Newer corrections supersede earlier requests.',
               'Use rename_thread to give the current Discord thread a useful public-facing title only once a substantive topic, project, question, or decision emerges. Keep the existing title for greetings or small talk; never use generic labels like "Friendly Greeting", "General Chat", or "Conversation".',
               'Name the concrete subject, such as "Codex OAuth in Docker". You may rename again as the topic develops, but only when it meaningfully improves the title, not for minor wording changes. This is independent of the internal discovery summary. Do not announce routine renames. The tool only works in actual Discord threads, not DMs or ordinary channels.'
             ].join('\n'),
@@ -148,7 +167,11 @@ export async function connectBot(
       ]
     })
   )
-  const harness = await Harness.open(storage, { models, registry, settings: { stream: { timeoutMs: 120_000 } }, onReport: console.error }, context)
+  const harness = await Harness.open(
+    storage,
+    { models, registry, settings: { steeringMode: 'all', followUpMode: 'all', stream: { timeoutMs: 120_000 } }, onReport: console.error },
+    context
+  )
   try {
     const receive = async (thread: Thread, message: Message) => {
       if (message.author.isBot) return

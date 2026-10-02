@@ -47,6 +47,11 @@ async function main() {
 
   const gateway = new AbortController()
   const stop = () => {
+    // A stuck SDK/network operation must not keep the process and database lock alive forever.
+    setTimeout(() => {
+      console.error('[clanker] Shutdown timed out; exiting to release the database lock.')
+      process.exit(1)
+    }, 10_000).unref()
     gateway.abort()
     void harness.close(BACKGROUND_CONTEXT).catch(error => console.error('[clanker] Shutdown failed', error))
   }
@@ -63,8 +68,11 @@ async function main() {
 }
 
 if (import.meta.main) {
-  main().catch(error => {
-    console.error('[clanker]', error)
-    process.exitCode = 1
-  })
+  main().then(
+    () => process.exit(0),
+    error => {
+      console.error('[clanker]', error)
+      process.exit(1)
+    }
+  )
 }
