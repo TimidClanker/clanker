@@ -1,7 +1,25 @@
-import type { Chat } from 'chat'
 import { DiscordAdapter } from '@chat-adapter/discord'
 
 export class Discord extends DiscordAdapter {
+  readonly renameInstructions = [
+    'Use rename_thread to give the current Discord thread a useful public-facing title only once a substantive topic, project, question, or decision emerges. Keep the existing title for greetings or small talk; never use generic labels like "Friendly Greeting", "General Chat", or "Conversation".',
+    'Name the concrete subject, such as "Codex OAuth in Docker". You may rename again as the topic develops, but only when it meaningfully improves the title, not for minor wording changes. This is independent of the internal discovery summary. Do not announce routine renames. The tool only works in actual Discord threads, not DMs or ordinary channels.'
+  ].join('\n')
+
+  replyChunk(text: string) {
+    // Discord limits content to 2,000 UTF-16 units. Keep surrogate pairs intact.
+    return text.slice(0, /[\uD800-\uDBFF]/.test(text[1999] ?? '') ? 1999 : 2000)
+  }
+
+  discoveryGroup(threadId: string) {
+    return this.decodeThreadId(threadId).guildId
+  }
+
+  sourceUrl(threadId: string) {
+    const { guildId, channelId, threadId: childId } = this.decodeThreadId(threadId)
+    return `https://discord.com/channels/${guildId}/${childId ?? channelId}`
+  }
+
   async renameThread(threadId: string, title: string) {
     const { guildId, channelId, threadId: childId } = this.decodeThreadId(threadId)
     if (guildId === '@me') throw new Error('Direct messages do not have a thread title to rename.')
@@ -47,28 +65,27 @@ export class Discord extends DiscordAdapter {
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
     return JSON.stringify([guildId, !!channel.nsfw, audience])
   }
-}
 
-export async function registerDiscordGateway(instance: Chat, signal: AbortSignal) {
-  const discord = instance.getAdapter('discord') as DiscordAdapter
-  let gatewayTask: Promise<unknown> | undefined
+  async start(signal: AbortSignal) {
+    let gatewayTask: Promise<unknown> | undefined
 
-  while (!signal.aborted) {
-    const response = await discord.startGatewayListener(
-      {
-        waitUntil(task) {
-          gatewayTask = task
-        }
-      },
-      60 * 60 * 1000,
-      signal
-    )
+    while (!signal.aborted) {
+      const response = await this.startGatewayListener(
+        {
+          waitUntil(task) {
+            gatewayTask = task
+          }
+        },
+        60 * 60 * 1000,
+        signal
+      )
 
-    if (!response.ok) {
-      throw new Error(await response.text())
+      if (!response.ok) {
+        throw new Error(await response.text())
+      }
+
+      await gatewayTask
+      if (!signal.aborted) await Bun.sleep(5000)
     }
-
-    await gatewayTask
-    if (!signal.aborted) await Bun.sleep(5000)
   }
 }

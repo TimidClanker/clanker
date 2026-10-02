@@ -6,8 +6,8 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
-    "auth": "bun run src/auth-cli.ts",
-    "login": "bun run src/auth-cli.ts login",
+    "auth": "bun run src/auth/cli.ts",
+    "login": "bun run src/auth/cli.ts login",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit"

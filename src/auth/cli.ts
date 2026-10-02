@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline/promises'
 import { Writable } from 'node:stream'
-import { credentials, models } from './auth'
-import { modelSelection } from './model'
+import { credentials, models } from './store'
+import { modelSelection } from '../model'
 
 async function main() {
   const [command, providerId = modelSelection.split('/')[0]!, method] = Bun.argv.slice(2)

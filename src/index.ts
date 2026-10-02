@@ -1,14 +1,13 @@
-import { Chat } from 'chat'
 import { Database } from 'bun:sqlite'
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { createMemoryState } from '@chat-adapter/state-memory'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node'
 
-import { connectBot } from './bot'
-import { Discord, registerDiscordGateway } from './adapter/discord'
-import { models } from './auth'
+import { openAgent } from './agent'
+import { createChatIntegration } from './extensions/chat'
+import { createDiscovery } from './extensions/discovery'
+import { models } from './auth/store'
 import { modelSelection, selectModel } from './model'
 
 async function main() {
@@ -30,37 +29,26 @@ async function main() {
   }
 
   await using cleanup = new AsyncDisposableStack()
-  const chat = new Chat({
-    userName: 'clanker',
-    adapters: { discord: new Discord() },
-    state: createMemoryState(),
-    concurrency: { strategy: 'concurrent', maxConcurrent: 1 },
-    logger: 'info'
-  })
-  cleanup.defer(() => chat.shutdown())
-  await chat.initialize()
+  const chat = createChatIntegration({ model, thinkingLevel })
+  cleanup.defer(() => chat.close())
 
   // Pi's supplied SQLite adapter works on Bun; no custom storage implementation is needed.
   const storage = await openNodeSqliteStorage(databasePath)
-  const harness = await connectBot(chat, storage, models, { provider: model.provider, modelId: model.id }, thinkingLevel, queryModel)
+  const harness = await openAgent(storage, models, [chat.extension, createDiscovery(chat.discovery, queryModel)])
   cleanup.defer(() => harness.close(BACKGROUND_CONTEXT))
 
-  const gateway = new AbortController()
   const stop = () => {
     // A stuck SDK/network operation must not keep the process and database lock alive forever.
     setTimeout(() => {
       console.error('[clanker] Shutdown timed out; exiting to release the database lock.')
       process.exit(1)
     }, 10_000).unref()
-    gateway.abort()
-    void harness.close(BACKGROUND_CONTEXT).catch(error => console.error('[clanker] Shutdown failed', error))
+    void Promise.all([chat.close(), harness.close(BACKGROUND_CONTEXT)]).catch(error => console.error('[clanker] Shutdown failed', error))
   }
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
   try {
-    await registerDiscordGateway(chat, gateway.signal)
-  } catch (error) {
-    if (!gateway.signal.aborted) throw error
+    await chat.connect(harness)
   } finally {
     process.off('SIGINT', stop)
     process.off('SIGTERM', stop)
