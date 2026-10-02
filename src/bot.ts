@@ -10,6 +10,8 @@ import {
   defineTask,
   defineTool,
   Harness,
+  InboxDoc,
+  LiveDoc,
   section,
   type ConversationId,
   type EntryId,
@@ -51,7 +53,10 @@ export async function connectBot(
 ) {
   const Reply = defineTask<
     { threadId: string; messageId: string; text: string; images?: ImageContent[]; previous: TaskId | null },
-    { phase: 'queue' } | { phase: 'answer'; submission: SubmissionId } | { phase: 'send'; text: string; answer?: EntryId },
+    | { phase: 'queue' }
+    | { phase: 'answer'; submission: SubmissionId }
+    | { phase: 'withdraw'; submissions: SubmissionId[] }
+    | { phase: 'send'; text: string; answer?: EntryId; attempt?: number; retryAt?: number },
     null
   >({
     name: 'clanker.reply',
@@ -85,7 +90,19 @@ export async function connectBot(
         using typing = showTyping(chat.thread(task.input.threadId))
         const submission = (await harness.submission(task.state.checkpoint.submission, ctx))!
         const settled = await submission.wait(ctx)
-        if (settled.status === 'unanswered') console.error('[clanker] Unanswered message', settled)
+        if (settled.status === 'unanswered') {
+          if (settled.reason !== 'aborted') console.error('[clanker] Unanswered message', settled)
+          await runtime.commit(async tx => {
+            if (settled.reason === 'aborted') return { status: 'terminal', outcome: { status: 'completed', result: null } }
+            // A newer submission may already have resumed the inbox. Leave that run alone.
+            const busy = (await tx.doc(LiveDoc, runtime.conversationId)).run !== undefined
+            const inbox = await tx.doc(InboxDoc, runtime.conversationId)
+            const submissions = busy ? [] : inbox.items.filter(item => item.mode !== 'write').map(item => item.id)
+            // Persist the exact set before withdrawing anything, so recovery cannot cancel newer inputs.
+            return { status: 'running', checkpoint: { phase: 'withdraw', submissions } }
+          }, ctx)
+          return
+        }
         await runtime.commit(async tx => {
           let text = 'Sorry, I could not generate a response. Please try again.'
           if (settled.status === 'done' && settled.type === 'input') {
@@ -107,15 +124,46 @@ export async function connectBot(
           }
         }, ctx)
       },
+      withdraw: async (task, runtime, ctx) => {
+        for (const id of task.state.checkpoint.submissions) {
+          // This only withdraws queued inputs; already-placed work is unaffected.
+          await harness.abortSubmission(id, ctx, runtime.conversationId)
+        }
+        await runtime.commit(
+          () => ({
+            status: 'running',
+            checkpoint: { phase: 'send', text: "Sorry, I couldn't complete this request. Please resend any messages that haven't received a reply." }
+          }),
+          ctx
+        )
+      },
       send: async (task, runtime, ctx) => {
-        const text = task.state.checkpoint.text
+        const { text, attempt = 0, retryAt, ...checkpoint } = task.state.checkpoint
+        if (retryAt !== undefined) await runtime.sleep(retryAt, ctx)
         // Discord limits content to 2,000 UTF-16 units. Keep surrogate pairs intact.
         const end = /[\uD800-\uDBFF]/.test(text[1999] ?? '') ? 1999 : 2000
         ctx.abortSignal?.throwIfAborted()
         // A crash after Discord accepts a post but before this checkpoint can repeat that chunk.
-        await chat.thread(task.input.threadId).post({ raw: text.slice(0, end) })
+        try {
+          await chat.thread(task.input.threadId).post({ raw: text.slice(0, end) })
+        } catch (error) {
+          ctx.abortSignal?.throwIfAborted()
+          const message = error instanceof Error ? error.message : String(error)
+          console.error('[clanker] Discord delivery failed', { threadId: task.input.threadId, taskId: runtime.taskId, attempt: attempt + 1, message })
+          await runtime.commit(
+            () =>
+              attempt >= 4
+                ? {
+                    status: 'terminal',
+                    outcome: { status: 'failed', error: { message, detail: { attempts: attempt + 1, remainingText: text, answer: checkpoint.answer ?? null } } }
+                  }
+                : { status: 'running', checkpoint: { ...checkpoint, text, attempt: attempt + 1, retryAt: runtime.now() + 1000 * 2 ** attempt } },
+            ctx
+          )
+          return
+        }
         await runtime.commit(async tx => {
-          if (text.length > end) return { status: 'running', checkpoint: { ...task.state.checkpoint, text: text.slice(end) } }
+          if (text.length > end) return { status: 'running', checkpoint: { ...checkpoint, text: text.slice(end) } }
           if (task.state.checkpoint.answer !== undefined) {
             const messages = await tx.doc(Messages, runtime.conversationId)
             messages.lastAnswer = task.state.checkpoint.answer
