@@ -2,6 +2,7 @@
 .codex
 .pi
 workspace
+secrets
 .data
 .env
 .env.*

@@ -4,19 +4,21 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
+    "auth": "bun run src/auth-cli.ts",
+    "login": "bun run src/auth-cli.ts login",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@typesafe-ai/sdk": "0.6.0",
     "@chat-adapter/discord": "4.40.0",
     "@chat-adapter/state-memory": "4.40.0",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "chat": "4.40.0",
-    "typebox": "1.3.7",
-    "zod": "4.5.4"
+    "@earendil-works/chord": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-durable": "1.0.0",
+    "chat": "4.40.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

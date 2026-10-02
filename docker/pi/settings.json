@@ -1,4 +1,0 @@
-{
-  "npmCommand": ["bun"],
-  "packages": ["npm:pi-web-access@0.29.0"]
-}

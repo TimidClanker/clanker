@@ -24,6 +24,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # caches
 workspace/
+secrets/
 .data/
 /clanker.sqlite
 /clanker.sqlite-*
