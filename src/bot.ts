@@ -131,7 +131,7 @@ export async function connectBot(
 
   const registry = createRegistry()
   const discord = chat.getAdapter('discord') as Discord
-  const discovery = createDiscovery(threadId => discord.discoveryScope(threadId), models, queryModel)
+  const discovery = createDiscovery(threadId => discord.discoveryScope(threadId), queryModel)
   registry.install(discovery)
   registry.install(
     defineExtension({
