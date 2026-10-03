@@ -1,7 +1,20 @@
 import { DiscordAdapter } from '@chat-adapter/discord'
 import type { Author } from 'chat'
+import type { PlatformAccount } from 'extensions/identity'
+import { discordDestination } from 'extensions/chat/adapters/discord-destination'
 
 export class Discord extends DiscordAdapter {
+  async resolveDestination(threadId: string, account: PlatformAccount, reference: string) {
+    const destination = await discordDestination(
+      path => this.discordFetch(path, 'GET'),
+      this.decodeThreadId(threadId).guildId,
+      account,
+      reference,
+      this.botUserId!
+    )
+    return { threadId: this.encodeThreadId(destination), title: destination.title }
+  }
+
   identifyAuthor(_threadId: string, author: Author) {
     return { platform: 'discord', scope: 'global', userId: author.userId }
   }

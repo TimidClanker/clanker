@@ -1,6 +1,6 @@
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import { configure, type AgentChange, type Harness } from '@earendil-works/pi-durable'
+import { configure, type AgentChange, type Harness, type Tx } from '@earendil-works/pi-durable'
 import type { Chat, Message, Thread } from 'chat'
 import { Conversations } from 'extensions/discovery'
 import { recordMessageAuthor } from 'extensions/identity'
@@ -10,6 +10,15 @@ import { downloadImages } from 'extensions/chat/attachments'
 import { showTyping } from 'extensions/chat/typing'
 import type { createDelivery } from 'extensions/chat/delivery'
 import { platformFor } from 'extensions/chat/adapters'
+
+export async function prepareConversation(tx: Tx, threadId: string, agent: AgentChange, description: string) {
+  const directory = await tx.doc(Threads)
+  const id = (directory.threads[threadId] ??= (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id)
+  await configure(tx, id, agent)
+  const catalog = (await tx.doc(Conversations)).conversations
+  catalog[id] ??= { threadId, title: description.slice(0, 100), summary: description.slice(0, 600), updatedAt: new Date().toISOString() }
+  return id
+}
 
 export async function connectChat(
   chat: Chat,
@@ -39,13 +48,7 @@ export async function connectChat(
     }
     await thread.subscribe()
     await harness.commit(async tx => {
-      const directory = await tx.doc(Threads)
-      let id = directory.threads[thread.id]
-      if (!id) {
-        id = (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id
-        directory.threads[thread.id] = id
-      }
-      await configure(tx, id, agentFor(thread.id))
+      const id = await prepareConversation(tx, thread.id, agentFor(thread.id), message.text.trim() || 'Image discussion')
       const messages = await tx.doc(Messages, id)
       if (messages.received[message.id]) return
       const author = await recordMessageAuthor(
@@ -55,10 +58,7 @@ export async function connectChat(
         platformFor(chat, thread.id).identifyAuthor(thread.id, message.author),
         message.author.fullName || message.author.userName
       )
-      const catalog = (await tx.doc(Conversations)).conversations
-      const description = message.text.trim() || 'Image discussion'
-      catalog[id] ??= { threadId: thread.id, title: description.slice(0, 100), summary: description.slice(0, 600), updatedAt: '' }
-      catalog[id]!.updatedAt = new Date().toISOString()
+      ;(await tx.doc(Conversations)).conversations[id]!.updatedAt = new Date().toISOString()
       const task = await tx.createTask(
         Reply,
         {

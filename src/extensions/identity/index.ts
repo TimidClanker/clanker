@@ -7,9 +7,11 @@ export {
   findIdentity,
   getIdentity,
   getMessageAuthor,
+  getRequestAuthor,
   getParticipants,
   linkIdentities,
   recordMessageAuthor,
+  recordAutomatedInput,
   type PlatformAccount
 } from 'extensions/identity/state'
 export { getUserNotes, type IdentityAccess } from 'extensions/identity/notes'

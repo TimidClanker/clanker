@@ -4,11 +4,14 @@ import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section, type Harness } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
 import { Conversations } from 'extensions/discovery'
-import type { IdentityAccess } from 'extensions/identity'
+import { recordAutomatedInput, type IdentityAccess } from 'extensions/identity'
 import { Discord } from 'extensions/chat/adapters/discord'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
-import { connectChat } from 'extensions/chat/bridge'
+import { connectChat, prepareConversation } from 'extensions/chat/bridge'
 import { createDelivery } from 'extensions/chat/delivery'
+import { createPost } from 'extensions/chat/post'
+import { Messages } from 'extensions/chat/state'
+import type { ScheduleChat } from 'extensions/schedules'
 
 export function createChatIntegration(
   selection: ReturnType<typeof selectModel>,
@@ -25,7 +28,8 @@ export function createChatIntegration(
   const shutdown = new AbortController()
   let listening: Promise<unknown> = Promise.resolve()
   let closing: Promise<void> | undefined
-  const Reply = createDelivery(chat, () => harness)
+  const Post = createPost(chat)
+  const Reply = createDelivery(chat, () => harness, Post)
   const rename = defineTool({
     name: 'rename_thread',
     description:
@@ -41,8 +45,46 @@ export function createChatIntegration(
       return { content: [{ type: 'text', text: JSON.stringify(await platform.renameThread(entry.threadId, title)) }] }
     }
   })
+  const agentFor = (threadId: string) => ({
+    model: { provider: selection.model.provider, modelId: selection.model.id },
+    thinkingLevel: selection.thinkingLevel,
+    tools: platformFor(chat, threadId).renameThread ? null : { remove: [rename] }
+  })
 
   return {
+    schedules: {
+      async resolve(source, account, reference, ctx) {
+        const current = (await harness.snapshot(Conversations, ctx))?.conversations[source]
+        if (!current) throw new Error('No chat thread is associated with this conversation')
+        if (reference === undefined) return { threadId: current.threadId, title: current.title }
+        const platform = platformFor(chat, current.threadId)
+        if (!platform.resolveDestination) throw new Error('This platform does not support directing tasks to other channels')
+        return platform.resolveDestination(current.threadId, account, reference)
+      },
+      async check(destination, account) {
+        const platform = platformFor(chat, destination.threadId)
+        await platform.resolveDestination?.(destination.threadId, account, destination.threadId)
+        await chat.thread(destination.threadId).subscribe()
+      },
+      prepare: (tx, destination) => prepareConversation(tx, destination.threadId, agentFor(destination.threadId), destination.title),
+      async enqueue(tx, conversationId, schedule, requestId, text) {
+        const destination = (await tx.doc(Conversations)).conversations[conversationId]
+        if (!destination) throw new Error('No chat thread is associated with this schedule')
+        await recordAutomatedInput(tx, conversationId, requestId)
+        const messages = await tx.doc(Messages, conversationId)
+        const reply = await tx.createTask(
+          Reply,
+          { threadId: destination.threadId, messageId: requestId, text, previous: messages.lastTask, schedule },
+          {
+            conversationId,
+            ownership: { kind: 'conversation' },
+            background: true
+          }
+        )
+        messages.lastTask = reply
+        return reply
+      }
+    } satisfies ScheduleChat,
     identity: {
       async privateAccount(read, conversationId, ctx) {
         const entry = (await read.snapshot(Conversations, ctx))?.conversations[conversationId]
@@ -53,7 +95,7 @@ export function createChatIntegration(
     extension: defineExtension({
       // Keep the stored selection name stable while moving its implementation.
       name: 'clanker',
-      tasks: [Reply],
+      tasks: [Reply, Post],
       tools: [rename],
       sections: [
         section('chat', async (input, ctx) => {
@@ -78,11 +120,7 @@ export function createChatIntegration(
     async connect(agent: Harness) {
       harness = agent
       await chat.initialize()
-      await connectChat(chat, harness, Reply, selection.model, threadId => ({
-        model: { provider: selection.model.provider, modelId: selection.model.id },
-        thinkingLevel: selection.thinkingLevel,
-        tools: platformFor(chat, threadId).renameThread ? null : { remove: [rename] }
-      }))
+      await connectChat(chat, harness, Reply, selection.model, agentFor)
       listening = Promise.all(Object.values(adapters).map(adapter => adapter.start?.(shutdown.signal)))
       try {
         await listening

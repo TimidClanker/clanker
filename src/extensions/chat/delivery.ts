@@ -3,15 +3,16 @@ import { AssistantEntry, defineTask, InboxDoc, LiveDoc, type Harness, type Entry
 import type { Chat } from 'chat'
 import { Messages } from 'extensions/chat/state'
 import { showTyping } from 'extensions/chat/typing'
-import { platformFor } from 'extensions/chat/adapters'
+import type { createPost } from 'extensions/chat/post'
 
-export function createDelivery(chat: Chat, getHarness: () => Harness) {
+export function createDelivery(chat: Chat, getHarness: () => Harness, Post: ReturnType<typeof createPost>) {
   return defineTask<
-    { threadId: string; messageId: string; text: string; images?: ImageContent[]; previous: TaskId | null },
+    { threadId: string; messageId: string; text: string; images?: ImageContent[]; previous: TaskId | null; schedule?: TaskId },
     | { phase: 'queue' }
     | { phase: 'answer'; submission: SubmissionId }
     | { phase: 'withdraw'; submissions: SubmissionId[] }
-    | { phase: 'send'; text: string; answer?: EntryId; attempt?: number; retryAt?: number },
+    | { phase: 'send'; text: string; answer?: EntryId; error?: string }
+    | { phase: 'delivered'; post: TaskId<null>; answer?: EntryId; error?: string },
     null
   >({
     name: 'clanker.reply',
@@ -19,6 +20,19 @@ export function createDelivery(chat: Chat, getHarness: () => Harness) {
     initial: () => ({ phase: 'queue' }),
     phases: {
       queue: async (task, runtime, ctx) => {
+        const schedule = task.input.schedule
+        if (schedule !== undefined) {
+          let cancelled = false
+          await runtime.commit(async tx => {
+            const owner = (await tx.task(schedule))!
+            const existing = await tx.submissionByRequest(runtime.conversationId, task.input.messageId)
+            cancelled = owner.abortRequested && !existing
+          }, ctx)
+          if (cancelled) {
+            await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx)
+            return
+          }
+        }
         // Admit input before waiting for earlier replies, so it can steer an active run.
         const conversation = (await runtime.conversation(runtime.conversationId, ctx))!
         const submission = await conversation.submit(
@@ -26,10 +40,12 @@ export function createDelivery(chat: Chat, getHarness: () => Harness) {
             type: 'input',
             content: task.input.images?.length ? [{ type: 'text', text: task.input.text }, ...task.input.images] : task.input.text,
             requestId: task.input.messageId,
-            whenBusy: 'steer'
+            whenBusy: schedule === undefined ? 'steer' : 'followUp'
           },
           ctx
         )
+        // Close the race with cancellation during admission. Already-placed input must still get its response.
+        if (schedule !== undefined && (await getHarness().getTask(schedule, ctx))!.abortRequested) await submission.abort(ctx)
         // Only delivery is serialized. requestId makes admission safe to repeat after a restart.
         await runtime.commit(
           () => ({
@@ -47,12 +63,26 @@ export function createDelivery(chat: Chat, getHarness: () => Harness) {
         const settled = await submission.wait(ctx)
         if (settled.status === 'unanswered') {
           if (settled.reason !== 'aborted') console.error('[clanker] Unanswered message', settled)
+          if (task.input.schedule !== undefined) {
+            if (settled.reason !== 'aborted') {
+              const conversation = (await getHarness().conversation(runtime.conversationId, ctx))!
+              await conversation.submit({ type: 'write', requestId: `reply-wake:${task.id}`, entry: { kind: 'chat.inbox-wake' } }, ctx)
+            }
+            await runtime.commit(
+              () =>
+                settled.reason === 'aborted'
+                  ? { status: 'terminal', outcome: { status: 'aborted' } }
+                  : { status: 'running', checkpoint: { phase: 'send', text: "Sorry, I couldn't complete this scheduled task.", error: settled.reason } },
+              ctx
+            )
+            return
+          }
           await runtime.commit(async tx => {
             if (settled.reason === 'aborted') return { status: 'terminal', outcome: { status: 'completed', result: null } }
             // A newer submission may already have resumed the inbox. Leave that run alone.
             const busy = (await tx.doc(LiveDoc, runtime.conversationId)).run !== undefined
             const inbox = await tx.doc(InboxDoc, runtime.conversationId)
-            const submissions = busy ? [] : inbox.items.filter(item => item.mode !== 'write').map(item => item.id)
+            const submissions = busy ? [] : inbox.items.filter(item => item.mode === 'steer').map(item => item.id)
             // Persist the exact set before withdrawing anything, so recovery cannot cancel newer inputs.
             return { status: 'running', checkpoint: { phase: 'withdraw', submissions } }
           }, ctx)
@@ -84,6 +114,9 @@ export function createDelivery(chat: Chat, getHarness: () => Harness) {
           // This only withdraws queued inputs; already-placed work is unaffected.
           await getHarness().abortSubmission(id, ctx, runtime.conversationId)
         }
+        // A failed run leaves follow-ups queued. A passive write resumes them without inventing another user input.
+        const conversation = (await getHarness().conversation(runtime.conversationId, ctx))!
+        await conversation.submit({ type: 'write', requestId: `reply-wake:${task.id}`, entry: { kind: 'chat.inbox-wake' } }, ctx)
         await runtime.commit(
           () => ({
             status: 'running',
@@ -93,37 +126,26 @@ export function createDelivery(chat: Chat, getHarness: () => Harness) {
         )
       },
       send: async (task, runtime, ctx) => {
-        const { text, attempt = 0, retryAt, ...checkpoint } = task.state.checkpoint
-        if (retryAt !== undefined) await runtime.sleep(retryAt, ctx)
-        const thread = chat.thread(task.input.threadId)
-        const chunk = platformFor(chat, thread.id).replyChunk?.(text) ?? text
-        const end = chunk.length
-        ctx.abortSignal?.throwIfAborted()
-        // A crash after the platform accepts a post but before this checkpoint can repeat that chunk.
-        try {
-          await thread.post({ raw: chunk })
-        } catch (error) {
-          ctx.abortSignal?.throwIfAborted()
-          const message = error instanceof Error ? error.message : String(error)
-          console.error('[clanker] Chat delivery failed', { threadId: task.input.threadId, taskId: runtime.taskId, attempt: attempt + 1, message })
-          await runtime.commit(
-            () =>
-              attempt >= 4
-                ? {
-                    status: 'terminal',
-                    outcome: { status: 'failed', error: { message, detail: { attempts: attempt + 1, remainingText: text, answer: checkpoint.answer ?? null } } }
-                  }
-                : { status: 'running', checkpoint: { ...checkpoint, text, attempt: attempt + 1, retryAt: runtime.now() + 1000 * 2 ** attempt } },
-            ctx
-          )
-          return
-        }
+        const { text, answer, error } = task.state.checkpoint
         await runtime.commit(async tx => {
-          if (text.length > end) return { status: 'running', checkpoint: { ...checkpoint, text: text.slice(end) } }
+          const post = await tx.createTask(Post, { threadId: task.input.threadId, text }, { ownership: { kind: 'task', taskId: task.id } })
+          return {
+            status: 'waiting',
+            checkpoint: { phase: 'delivered', post, ...(answer === undefined ? {} : { answer }), ...(error ? { error } : {}) },
+            on: [post],
+            policy: 'allSettled'
+          }
+        }, ctx)
+      },
+      delivered: async (task, runtime, ctx) => {
+        const [outcome] = await runtime.outcomes([task.state.checkpoint.post], ctx)
+        await runtime.commit(async tx => {
+          if (outcome!.status !== 'completed') return { status: 'terminal', outcome: { status: 'failed', error: { message: 'Chat delivery failed' } } }
           if (task.state.checkpoint.answer !== undefined) {
             const messages = await tx.doc(Messages, runtime.conversationId)
             messages.lastAnswer = task.state.checkpoint.answer
           }
+          if (task.state.checkpoint.error) return { status: 'terminal', outcome: { status: 'failed', error: { message: task.state.checkpoint.error } } }
           return { status: 'terminal', outcome: { status: 'completed', result: null } }
         }, ctx)
       }

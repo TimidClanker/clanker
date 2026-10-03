@@ -50,7 +50,7 @@ const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: J
 
 const transcript = (entries: readonly EntryRecord[]) =>
   entries.flatMap(entry => {
-    if (entry.kind !== 'pi.user' && entry.kind !== 'pi.assistant') return []
+    if (entry.kind !== 'pi.user' && entry.kind !== 'pi.assistant' && entry.kind !== 'chat.notification') return []
     return (entry.model ?? []).flatMap(message => {
       if (message.role !== 'user' && message.role !== 'assistant') return []
       if (message.role === 'assistant' && ['aborted', 'error'].includes(message.stopReason)) return []
