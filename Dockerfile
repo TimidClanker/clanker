@@ -16,6 +16,7 @@ ENV NODE_ENV=production DATABASE_PATH=/app/workspace/durable.sqlite SECRETS_DIR=
 COPY --from=dependencies --chown=bun:bun /app/node_modules ./node_modules
 COPY --chown=bun:bun package.json bun.lock LICENSE ./
 COPY --chown=bun:bun src ./src
+COPY --chown=bun:bun tsconfig.json .
 RUN mkdir -p /app/workspace /app/secrets \
     && chown bun:bun /app/workspace /app/secrets \
     && chmod 700 /app/secrets
