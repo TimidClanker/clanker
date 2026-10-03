@@ -4,6 +4,7 @@ import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section, type Harness } from '@earendil-works/pi-durable'
 import type { selectModel } from '../../model'
 import { Conversations } from '../discovery'
+import type { IdentityAccess } from '../identity'
 import { Discord } from './adapters/discord'
 import { platformFor, type PlatformAdapter } from './adapters'
 import { connectChat } from './bridge'
@@ -42,6 +43,13 @@ export function createChatIntegration(
   })
 
   return {
+    identity: {
+      async privateAccount(read, conversationId, ctx) {
+        const entry = (await read.snapshot(Conversations, ctx))?.conversations[conversationId]
+        if (!entry) return null
+        return (await platformFor(chat, entry.threadId).privateRecipient?.(entry.threadId)) ?? null
+      }
+    } satisfies IdentityAccess,
     extension: defineExtension({
       // Keep the stored selection name stable while moving its implementation.
       name: 'clanker',

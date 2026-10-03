@@ -13,6 +13,7 @@ import {
   type EntryRecord
 } from '@earendil-works/pi-durable'
 import type { selectModel } from '../../model'
+import { getIdentity, getParticipants } from '../identity'
 
 export const Conversations = defineDoc<{
   conversations: Record<string, { threadId: string; title: string; summary: string; updatedAt: string }>
@@ -117,15 +118,23 @@ export function createDiscovery(
         description: 'Find accessible conversations by words in their titles and summaries. Results are newest first; offset pages through matches.',
         parameters: Type.Object({
           query: Type.Optional(Type.String({ maxLength: 200 })),
+          participantId: Type.Optional(Type.String({ description: 'Identity ID from list_participants; only searches conversations you can already access.' })),
           offset: Type.Optional(Type.Integer({ minimum: 0 })),
           limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 }))
         }),
         replay: 'safe',
-        execute: async ({ query = '', offset = 0, limit = 10 }, api, ctx) => {
+        execute: async ({ query = '', participantId, offset = 0, limit = 10 }, api, ctx) => {
           const words = query.toLowerCase().split(/\s+/).filter(Boolean)
-          const matches = (await visible(api, api.conversationId, ctx)).filter(
+          let matches = (await visible(api, api.conversationId, ctx)).filter(
             entry => entry.id !== api.conversationId && words.every(word => `${entry.title} ${entry.summary}`.toLowerCase().includes(word))
           )
+          if (participantId) {
+            const id = (await getIdentity(api, participantId, ctx)).id
+            const participated = await Promise.all(
+              matches.map(async entry => (await getParticipants(api, entry.id, ctx)).some(author => author.identityId === id))
+            )
+            matches = matches.filter((_, index) => participated[index])
+          }
           return result({ conversations: matches.slice(offset, offset + limit), nextOffset: offset + limit < matches.length ? offset + limit : null })
         }
       }),

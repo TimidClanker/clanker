@@ -1,7 +1,10 @@
-import type { Adapter, Chat } from 'chat'
+import type { Adapter, Author, Chat } from 'chat'
+import type { PlatformAccount } from '../../identity'
 
-// Optional platform behavior beyond Chat SDK's common messaging interface.
+// Account namespaces and platform behavior beyond Chat SDK's common messaging interface.
 export type PlatformAdapter = Adapter & {
+  identifyAuthor(threadId: string, author: Author): PlatformAccount
+  privateRecipient?(threadId: string): Promise<PlatformAccount | null>
   start?(signal: AbortSignal): Promise<void>
   replyChunk?(text: string): string
   discoveryGroup?(threadId: string): string

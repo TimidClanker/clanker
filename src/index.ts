@@ -8,6 +8,7 @@ import { openAgent } from './agent'
 import { createChatIntegration } from './extensions/chat'
 import { createDiscovery } from './extensions/discovery'
 import { createWeb } from './extensions/web'
+import { createIdentity } from './extensions/identity'
 import { models } from './auth/store'
 import { modelSelection, selectModel } from './model'
 
@@ -36,6 +37,7 @@ async function main() {
   // Pi's supplied SQLite adapter works on Bun; no custom storage implementation is needed.
   const storage = await openNodeSqliteStorage(databasePath)
   const harness = await openAgent(storage, models, [
+    createIdentity(chat.identity),
     chat.extension,
     createDiscovery(chat.discovery, queryModel),
     createWeb(models, selectModel(process.env.SEARCH_MODEL ?? modelSelection))

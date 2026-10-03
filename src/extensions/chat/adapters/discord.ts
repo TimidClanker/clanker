@@ -1,6 +1,24 @@
 import { DiscordAdapter } from '@chat-adapter/discord'
+import type { Author } from 'chat'
 
 export class Discord extends DiscordAdapter {
+  identifyAuthor(_threadId: string, author: Author) {
+    return { platform: 'discord', scope: 'global', userId: author.userId }
+  }
+
+  async privateRecipient(threadId: string) {
+    const { guildId, channelId, threadId: childId } = this.decodeThreadId(threadId)
+    if (guildId !== '@me' || childId) return null
+    const channel = (await (await this.discordFetch(`/channels/${channelId}`, 'GET')).json()) as {
+      id: string
+      type: number
+      recipients?: { id: string; bot?: boolean }[]
+    }
+    // The SDK's isDM also includes group DMs; only an actual one-to-one recipient proves private access.
+    if (channel.id !== channelId || channel.type !== 1 || channel.recipients?.length !== 1 || channel.recipients[0]!.bot) return null
+    return { platform: 'discord', scope: 'global', userId: channel.recipients[0]!.id }
+  }
+
   readonly renameInstructions = [
     'Use rename_thread to give the current Discord thread a useful public-facing title only once a substantive topic, project, question, or decision emerges. Keep the existing title for greetings or small talk; never use generic labels like "Friendly Greeting", "General Chat", or "Conversation".',
     'Name the concrete subject, such as "Codex OAuth in Docker". You may rename again as the topic develops, but only when it meaningfully improves the title, not for minor wording changes. This is independent of the internal discovery summary. Do not announce routine renames. The tool only works in actual Discord threads, not DMs or ordinary channels.'

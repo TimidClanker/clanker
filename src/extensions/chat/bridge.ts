@@ -3,11 +3,13 @@ import type { ImageContent } from '@earendil-works/pi-ai'
 import { configure, type AgentChange, type Harness } from '@earendil-works/pi-durable'
 import type { Chat, Message, Thread } from 'chat'
 import { Conversations } from '../discovery'
+import { recordMessageAuthor } from '../identity'
 import type { selectModel } from '../../model'
 import { Threads, Messages } from './state'
 import { downloadImages } from './attachments'
 import { showTyping } from './typing'
 import type { createDelivery } from './delivery'
+import { platformFor } from './adapters'
 
 export async function connectChat(
   chat: Chat,
@@ -46,6 +48,13 @@ export async function connectChat(
       await configure(tx, id, agentFor(thread.id))
       const messages = await tx.doc(Messages, id)
       if (messages.received[message.id]) return
+      const author = await recordMessageAuthor(
+        tx,
+        id,
+        message.id,
+        platformFor(chat, thread.id).identifyAuthor(thread.id, message.author),
+        message.author.fullName || message.author.userName
+      )
       const catalog = (await tx.doc(Conversations)).conversations
       const description = message.text.trim() || 'Image discussion'
       catalog[id] ??= { threadId: thread.id, title: description.slice(0, 100), summary: description.slice(0, 600), updatedAt: '' }
@@ -55,7 +64,7 @@ export async function connectChat(
         {
           threadId: thread.id,
           messageId: message.id,
-          text: `${message.author.fullName || message.author.userName}: ${message.text.trim() || 'Please describe this image.'}`,
+          text: `Sender: ${JSON.stringify({ messageId: message.id, identityId: author.identityId, displayName: author.displayName })}\n${message.text.trim() || 'Please describe this image.'}`,
           images,
           previous: messages.lastTask
         },
