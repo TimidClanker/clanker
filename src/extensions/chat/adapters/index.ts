@@ -1,5 +1,5 @@
 import type { Adapter, Author, Chat } from 'chat'
-import type { PlatformAccount } from '../../identity'
+import type { PlatformAccount } from 'extensions/identity'
 
 // Account namespaces and platform behavior beyond Chat SDK's common messaging interface.
 export type PlatformAdapter = Adapter & {

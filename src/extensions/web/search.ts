@@ -1,6 +1,6 @@
 import { Type, type Models } from '@earendil-works/pi-ai'
 import { defineTool } from '@earendil-works/pi-durable'
-import type { selectModel } from '../../model'
+import type { selectModel } from 'model'
 
 // Pi's normalized assistant messages omit hosted-tool results and citation annotations.
 type SearchItem = {

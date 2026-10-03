@@ -12,8 +12,8 @@ import {
   type EntryId,
   type EntryRecord
 } from '@earendil-works/pi-durable'
-import type { selectModel } from '../../model'
-import { getIdentity, getParticipants } from '../identity'
+import type { selectModel } from 'model'
+import { getIdentity, getParticipants } from 'extensions/identity'
 
 export const Conversations = defineDoc<{
   conversations: Record<string, { threadId: string; title: string; summary: string; updatedAt: string }>

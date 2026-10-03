@@ -1,5 +1,5 @@
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai'
-import { models } from './auth/store'
+import { models } from 'auth/store'
 
 export const modelSelection = process.env.MODEL ?? `${process.env.MODEL_PROVIDER ?? 'openai'}/${process.env.MODEL_ID ?? 'gpt-5.6-sol'}`
 

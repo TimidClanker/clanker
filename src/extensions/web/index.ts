@@ -1,7 +1,7 @@
 import { Type, type Models } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section } from '@earendil-works/pi-durable'
-import type { selectModel } from '../../model'
-import { createSearchTool } from './search'
+import type { selectModel } from 'model'
+import { createSearchTool } from 'extensions/web/search'
 
 const maxBytes = 5 * 1024 * 1024
 

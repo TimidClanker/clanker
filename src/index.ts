@@ -4,13 +4,13 @@ import { dirname } from 'node:path'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node'
 
-import { openAgent } from './agent'
-import { createChatIntegration } from './extensions/chat'
-import { createDiscovery } from './extensions/discovery'
-import { createWeb } from './extensions/web'
-import { createIdentity } from './extensions/identity'
-import { models } from './auth/store'
-import { modelSelection, selectModel } from './model'
+import { openAgent } from 'agent'
+import { createChatIntegration } from 'extensions/chat'
+import { createDiscovery } from 'extensions/discovery'
+import { createWeb } from 'extensions/web'
+import { createIdentity } from 'extensions/identity'
+import { models } from 'auth/store'
+import { modelSelection, selectModel } from 'model'
 
 async function main() {
   const { model, thinkingLevel } = selectModel(modelSelection)

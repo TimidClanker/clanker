@@ -1,9 +1,9 @@
 import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai'
 import { AssistantEntry, defineTask, InboxDoc, LiveDoc, type Harness, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
 import type { Chat } from 'chat'
-import { Messages } from './state'
-import { showTyping } from './typing'
-import { platformFor } from './adapters'
+import { Messages } from 'extensions/chat/state'
+import { showTyping } from 'extensions/chat/typing'
+import { platformFor } from 'extensions/chat/adapters'
 
 export function createDelivery(chat: Chat, getHarness: () => Harness) {
   return defineTask<

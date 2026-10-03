@@ -1,10 +1,18 @@
 import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section } from '@earendil-works/pi-durable'
-import { getParticipants } from './state'
-import { createNoteTools, type IdentityAccess } from './notes'
+import { getParticipants } from 'extensions/identity/state'
+import { createNoteTools, type IdentityAccess } from 'extensions/identity/notes'
 
-export { findIdentity, getIdentity, getMessageAuthor, getParticipants, linkIdentities, recordMessageAuthor, type PlatformAccount } from './state'
-export { getUserNotes, type IdentityAccess } from './notes'
+export {
+  findIdentity,
+  getIdentity,
+  getMessageAuthor,
+  getParticipants,
+  linkIdentities,
+  recordMessageAuthor,
+  type PlatformAccount
+} from 'extensions/identity/state'
+export { getUserNotes, type IdentityAccess } from 'extensions/identity/notes'
 
 export const createIdentity = (access: IdentityAccess) =>
   defineExtension({

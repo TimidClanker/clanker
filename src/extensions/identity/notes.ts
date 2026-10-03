@@ -1,7 +1,7 @@
 import type { Context } from '@earendil-works/chord'
 import { Type } from '@earendil-works/pi-ai'
 import { defineDoc, defineTool, type ConversationId, type DocumentReader, type ToolExecutionApi } from '@earendil-works/pi-durable'
-import { findIdentity, getIdentity, getParticipants, type PlatformAccount } from './state'
+import { findIdentity, getIdentity, getParticipants, type PlatformAccount } from 'extensions/identity/state'
 
 export type IdentityAccess = {
   /** A freshly verified one-to-one chat recipient; null for groups or unsupported adapters. */
