@@ -6,16 +6,17 @@ import { createNoteTools, type IdentityAccess } from 'extensions/identity/notes'
 export {
   findIdentity,
   getIdentity,
-  getMessageAuthor,
+  resolveIdentity,
   getRequestAuthor,
   getRequestActors,
   getParticipants,
   linkIdentities,
   recordMessageAuthor,
   recordAutomatedInput,
+  type Author,
   type PlatformAccount
 } from 'extensions/identity/state'
-export { getUserNotes, type IdentityAccess } from 'extensions/identity/notes'
+export type { IdentityAccess } from 'extensions/identity/notes'
 
 export const createIdentity = (access: IdentityAccess) =>
   defineExtension({

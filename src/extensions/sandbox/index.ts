@@ -10,16 +10,16 @@ import {
   type ToolRegistration
 } from '@earendil-works/pi-durable'
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from '@earendil-works/pi-durable/tools'
-import { getRequestActors, type PlatformAccount } from 'extensions/identity'
+import { findIdentity, getIdentity, getRequestActors, type PlatformAccount } from 'extensions/identity'
 import { createWorkspaces } from 'extensions/sandbox/workspaces'
 import { ownerKey, Workspaces, type SandboxOwner } from 'extensions/sandbox/state'
 import type { SandboxProvider } from 'extensions/sandbox/providers'
-import { createDesktopTool } from 'extensions/sandbox/desktop'
-import { createImageTool } from 'extensions/sandbox/image'
+import { DesktopTool } from 'extensions/sandbox/desktop'
+import { ImageTool } from 'extensions/sandbox/image'
 
-export type { SandboxProvider } from 'extensions/sandbox/providers'
 export type SandboxAccess = {
-  resolve(read: DocumentReader, conversationId: ConversationId, accounts: PlatformAccount[], ctx: Context): Promise<SandboxOwner>
+  /** Verify every requester's membership; return the recipient for private chats, null for groups. */
+  audience(read: DocumentReader, conversationId: ConversationId, accounts: PlatformAccount[], ctx: Context): Promise<PlatformAccount | null>
 }
 type Grant = { accounts: PlatformAccount[] } | { error: string }
 
@@ -40,7 +40,16 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
       const generation = task.owner === undefined ? undefined : await api.getTask(task.owner, ctx)
       const grant = generation?.memos?.['sandbox.grant'] as Grant | undefined
       if (!grant || 'error' in grant) throw new Error(grant && 'error' in grant ? grant.error : 'No verified sandbox owner for this model round')
-      const owner = await access.resolve(api, api.conversationId, grant.accounts, ctx)
+      if (!grant.accounts.length) throw new Error('Sandbox access requires a verified requester')
+      const recipient = await access.audience(api, api.conversationId, grant.accounts, ctx)
+      let owner: SandboxOwner = { kind: 'conversation', id: String(api.conversationId) }
+      if (recipient) {
+        const id = await findIdentity(api, recipient, ctx)
+        if (!id || (await Promise.all(grant.accounts.map(account => findIdentity(api, account, ctx)))).some(author => author !== id)) {
+          throw new Error('Private sandbox access requires the verified recipient')
+        }
+        owner = { kind: 'identity', ...(await getIdentity(api, id, ctx)) }
+      }
       const key = ownerKey(owner)
       const workspace = await api.commit(async tx => {
         const all = await tx.doc(Workspaces)
@@ -53,16 +62,11 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
           ).values()
         ]
         if (!all[key] && previous.length > 1) throw new Error('Linked identities have multiple workspaces; choose a workspace before continuing')
-        const saved = (all[key] ??= previous[0] ?? { id: `clanker-${crypto.randomUUID()}`, provider: provider.name, established: false })
+        const saved = (all[key] ??= previous[0] ?? { id: `clanker-${crypto.randomUUID()}`, provider: provider.name })
         if (saved.provider !== provider.name) throw new Error(`This workspace uses the ${saved.provider} provider`)
         return { ...saved }
       }, ctx)
-      return workspaces.use({ ...workspace, scope: owner.kind }, ctx, async env => {
-        await api.commit(async tx => {
-          for (const saved of Object.values(await tx.doc(Workspaces))) if (saved.id === workspace.id) saved.established = true
-        }, ctx)
-        return tool.execute(args, { ...api, env }, ctx)
-      })
+      return workspaces.use({ ...workspace, scope: owner.kind }, ctx, env => tool.execute(args, { ...api, env }, ctx))
     }
   })
   return {
@@ -74,8 +78,8 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
         bind(createWriteTool()),
         bind(createEditTool()),
         bind(shell),
-        bind(createImageTool()),
-        ...(provider.desktop ? [bind(createDesktopTool())] : [])
+        bind(ImageTool),
+        ...(provider.desktop ? [bind(DesktopTool)] : [])
       ],
       hooks: [
         hook(GenerationTask, {

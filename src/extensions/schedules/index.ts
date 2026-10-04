@@ -1,6 +1,6 @@
 import { Type } from '@earendil-works/pi-ai'
 import { defineDoc, defineExtension, defineTool, section, type Harness, type TaskId, type TaskRecord } from '@earendil-works/pi-durable'
-import { getIdentity, getRequestAuthor } from 'extensions/identity'
+import { resolveIdentity, getRequestAuthor } from 'extensions/identity'
 import { createScheduleTask, type ScheduleChat, type ScheduleInput, type ScheduleState } from 'extensions/schedules/task'
 import { resolveTiming, When } from 'extensions/schedules/time'
 
@@ -141,8 +141,8 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
           )
             throw new Error('Schedule not found in this conversation')
           const author = await getRequestAuthor(api, getHarness(), ctx)
-          const owner = await getIdentity(api, (task.input as ScheduleInput).ownerIdentityId, ctx)
-          if (owner.id !== author.identityId) throw new Error('Only the schedule owner can cancel it')
+          const owner = await resolveIdentity(api, (task.input as ScheduleInput).ownerIdentityId, ctx)
+          if (owner !== author.identityId) throw new Error('Only the schedule owner can cancel it')
           await getHarness().abortTask(task.id, ctx)
           const settled = await getHarness().waitForTask(task.id, ctx)
           return result({ id, outcome: settled.state.outcome.status })

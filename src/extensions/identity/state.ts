@@ -3,7 +3,7 @@ import { defineDoc, LiveDoc, type ConversationId, type DocumentReader, type Harn
 
 // Scope is the platform's account namespace, e.g. a Slack workspace or "global" for Discord.
 export type PlatformAccount = { platform: string; scope: string; userId: string }
-type Author = { identityId: string; account: PlatformAccount; displayName: string }
+export type Author = { identityId: string; account: PlatformAccount; displayName: string }
 
 const Directory = defineDoc<{
   identities: Record<string, { name: string; linkedTo?: string }>
@@ -74,18 +74,18 @@ export async function linkIdentities(tx: Tx, keepId: string, otherId: string) {
 }
 
 /** Resolve saved IDs after account linking; old references remain valid. For trusted application code. */
+export async function resolveIdentity(read: DocumentReader, identityId: string, ctx: Context) {
+  const directory = await read.snapshot(Directory, ctx)
+  return canonicalId(directory?.identities ?? {}, identityId)
+}
+
+/** Include aliases only when reading state saved under previously linked identities. */
 export async function getIdentity(read: DocumentReader, identityId: string, ctx: Context) {
   const directory = await read.snapshot(Directory, ctx)
   if (!directory) throw new Error('Identity not found')
   const id = canonicalId(directory.identities, identityId)
   const aliases = Object.keys(directory.identities).filter(other => other !== id && canonicalId(directory.identities, other) === id)
-  const accounts = Object.entries(directory.accounts)
-    .filter(([, owner]) => canonicalId(directory.identities, owner) === id)
-    .map(([key]) => {
-      const [platform, scope, userId] = JSON.parse(key) as [string, string, string]
-      return { platform, scope, userId }
-    })
-  return { id, name: directory.identities[id]!.name, accounts, aliases }
+  return { id, aliases }
 }
 
 /** Resolve a platform account without creating it. Names and email claims are never identity keys. */
@@ -101,14 +101,6 @@ export async function getParticipants(read: DocumentReader, conversationId: Conv
   if (!conversation) return []
   const directory = (await read.snapshot(Directory, ctx))!
   return Object.values(conversation.participants).map(author => ({ ...author, identityId: canonicalId(directory.identities, author.identityId) }))
-}
-
-/** Resolve one specific message's sender; there is deliberately no conversation-wide "current user". */
-export async function getMessageAuthor(read: DocumentReader, conversationId: ConversationId, messageId: string, ctx: Context): Promise<Author | undefined> {
-  const author = (await read.snapshot(ConversationIdentities, conversationId, ctx))?.messages[JSON.stringify(messageId)]
-  if (!author) return undefined
-  const directory = (await read.snapshot(Directory, ctx))!
-  return { ...author, identityId: canonicalId(directory.identities, author.identityId) }
 }
 
 /** Authority for user-owned actions comes from admitted input, never a model-supplied identity ID. */
@@ -132,21 +124,18 @@ export async function getRequestActors(
 ): Promise<Author[]> {
   const inputs = (await read.snapshot(LiveDoc, conversationId, ctx))?.run?.inputs ?? []
   const automated = await read.snapshot(AutomatedInputs, conversationId, ctx)
-  const authors = (
-    await Promise.all(
-      inputs.map(async id => {
-        const submission = await harness.submission(id, ctx)
-        const record = await submission?.status(ctx)
-        const owner = record?.requestId ? automated?.[JSON.stringify(record.requestId)] : undefined
-        if (owner) {
-          if (!includeAutomated) return null
-          if (owner === true) return undefined
-          return { ...owner, identityId: (await getIdentity(read, owner.identityId, ctx)).id }
-        }
-        return record?.requestId ? getMessageAuthor(read, conversationId, record.requestId, ctx) : undefined
-      })
-    )
-  ).filter(author => author !== null)
-  if (authors.some(author => !author)) throw new Error('An admitted input has no verified author')
-  return authors as Author[]
+  const conversation = await read.snapshot(ConversationIdentities, conversationId, ctx)
+  const directory = await read.snapshot(Directory, ctx)
+  const authors: Author[] = []
+  for (const id of inputs) {
+    const submission = await harness.submission(id, ctx)
+    const record = await submission?.status(ctx)
+    const key = JSON.stringify(record?.requestId)
+    const owner = key ? automated?.[key] : undefined
+    if (owner && !includeAutomated) continue
+    const author = owner ?? (key ? conversation?.messages[key] : undefined)
+    if (!author || author === true) throw new Error('An admitted input has no verified author')
+    authors.push({ ...author, identityId: canonicalId(directory?.identities ?? {}, author.identityId) })
+  }
+  return authors
 }

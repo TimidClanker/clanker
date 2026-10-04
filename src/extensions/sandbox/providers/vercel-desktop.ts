@@ -3,7 +3,6 @@ import type { Sandbox } from '@vercel/sandbox'
 
 const directory = '/tmp/clanker-desktop-runtime'
 const statePath = `${directory}/session.json`
-type DesktopState = { sessionId: string; commandId: string; viewPassword: string; controlPassword: string }
 
 /** Credentials and command identity live with the sandbox so a host restart can reconnect. */
 export class VercelDesktop {
@@ -12,7 +11,9 @@ export class VercelDesktop {
   private async current(ctx: Context) {
     const options = { signal: ctx.abortSignal }
     if (!(await this.sandbox.fs.exists(statePath, options))) return
-    const state: DesktopState = JSON.parse(await this.sandbox.fs.readFile(statePath, { ...options, encoding: 'utf8' }))
+    const state: { sessionId: string; commandId: string; viewPassword: string; controlPassword: string } = JSON.parse(
+      await this.sandbox.fs.readFile(statePath, { ...options, encoding: 'utf8' })
+    )
     if (state.sessionId !== this.sandbox.currentSession().sessionId) return
     const command = await this.sandbox.getCommand(state.commandId, options)
     if (command.exitCode === null) return { state, command }

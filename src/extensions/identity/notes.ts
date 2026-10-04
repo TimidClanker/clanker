@@ -38,8 +38,7 @@ async function noteAccess(read: DocumentReader, conversationId: ConversationId, 
   }
 }
 
-/** Other extensions must use this scoped reader rather than reading the backing document directly. */
-export async function getUserNotes(read: DocumentReader, conversationId: ConversationId, identityId: string, access: IdentityAccess, ctx: Context) {
+async function getUserNotes(read: DocumentReader, conversationId: ConversationId, identityId: string, access: IdentityAccess, ctx: Context) {
   const scope = await noteAccess(read, conversationId, identityId, access, ctx)
   const notes = Object.entries((await read.snapshot(Notes, ctx))?.notes ?? {})
     .filter(([, note]) => scope.visible(note))

@@ -1,8 +1,7 @@
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import { configure, type AgentChange, type Harness, type Tx } from '@earendil-works/pi-durable'
+import { configure, type AgentChange, type ConversationId, type Harness, type Tx } from '@earendil-works/pi-durable'
 import type { Chat, Message, Thread } from 'chat'
-import { Conversations } from 'extensions/discovery'
 import { recordMessageAuthor } from 'extensions/identity'
 import type { selectModel } from 'model'
 import { Threads, Messages } from 'extensions/chat/state'
@@ -11,12 +10,10 @@ import { showTyping } from 'extensions/chat/typing'
 import type { createDelivery } from 'extensions/chat/delivery'
 import { platformFor } from 'extensions/chat/adapters'
 
-export async function prepareConversation(tx: Tx, threadId: string, agent: AgentChange, description: string) {
+export async function prepareConversation(tx: Tx, threadId: string, agent: AgentChange) {
   const directory = await tx.doc(Threads)
   const id = (directory.threads[threadId] ??= (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id)
   await configure(tx, id, agent)
-  const catalog = (await tx.doc(Conversations)).conversations
-  catalog[id] ??= { threadId, title: description.slice(0, 100), summary: description.slice(0, 600), updatedAt: new Date().toISOString() }
   return id
 }
 
@@ -25,7 +22,8 @@ export async function connectChat(
   harness: Harness,
   Reply: ReturnType<typeof createDelivery>,
   model: ReturnType<typeof selectModel>['model'],
-  agentFor: (threadId: string) => AgentChange
+  agentFor: (threadId: string) => AgentChange,
+  onMessage?: (tx: Tx, id: ConversationId, text: string) => Promise<void>
 ) {
   const receive = async (thread: Thread, message: Message) => {
     if (message.author.isBot) return
@@ -48,7 +46,7 @@ export async function connectChat(
     }
     await thread.subscribe()
     await harness.commit(async tx => {
-      const id = await prepareConversation(tx, thread.id, agentFor(thread.id), message.text.trim() || 'Image discussion')
+      const id = await prepareConversation(tx, thread.id, agentFor(thread.id))
       const messages = await tx.doc(Messages, id)
       if (messages.received[message.id]) return
       const author = await recordMessageAuthor(
@@ -58,7 +56,7 @@ export async function connectChat(
         platformFor(chat, thread.id).identifyAuthor(thread.id, message.author),
         message.author.fullName || message.author.userName
       )
-      ;(await tx.doc(Conversations)).conversations[id]!.updatedAt = new Date().toISOString()
+      await onMessage?.(tx, id, message.text.trim() || 'Image discussion')
       const task = await tx.createTask(
         Reply,
         {
@@ -79,16 +77,7 @@ export async function connectChat(
   chat.onDirectMessage(receive)
   chat.onSubscribedMessage(receive)
   for (const [threadId, id] of Object.entries((await harness.snapshot(Threads, context))?.threads ?? {})) {
-    await harness.commit(async tx => {
-      const catalog = (await tx.doc(Conversations)).conversations
-      if (!catalog[id]) {
-        const page = await tx.scanEntries({ conversationId: id }, 50)
-        const last = page.items.flatMap(entry => entry.model ?? []).find(message => message.role === 'user' && typeof message.content === 'string')
-        const text = typeof last?.content === 'string' ? last.content : threadId
-        catalog[id] = { threadId, title: text.slice(0, 100), summary: text.slice(0, 600), updatedAt: new Date(last?.timestamp ?? 0).toISOString() }
-      }
-      await configure(tx, id, agentFor(threadId))
-    }, context)
+    await harness.commit(tx => configure(tx, id, agentFor(threadId)), context)
     await chat.thread(threadId).subscribe()
   }
   harness.resume()

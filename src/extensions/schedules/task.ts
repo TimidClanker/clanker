@@ -1,6 +1,6 @@
 import type { Context } from '@earendil-works/chord'
 import { defineTask, type ConversationId, type Harness, type TaskId, type Tx } from '@earendil-works/pi-durable'
-import type { PlatformAccount } from 'extensions/identity'
+import type { Author, PlatformAccount } from 'extensions/identity'
 import { nextOccurrence, type Timing } from 'extensions/schedules/time'
 
 export type Destination = { threadId: string; title: string }
@@ -8,7 +8,11 @@ export type ScheduleChat = {
   resolve(source: ConversationId, account: PlatformAccount, reference: string | undefined, ctx: Context): Promise<Destination>
   check(destination: Destination, account: PlatformAccount): Promise<void>
   prepare(tx: Tx, destination: Destination): Promise<ConversationId>
-  enqueue(tx: Tx, conversationId: ConversationId, schedule: TaskId, requestId: string, text: string): Promise<TaskId<null>>
+  enqueue(
+    tx: Tx,
+    conversationId: ConversationId,
+    event: { schedule: TaskId; requestId: string; text: string; owner: Author; threadId: string }
+  ): Promise<TaskId<null>>
 }
 export type ScheduleInput = {
   sourceConversationId: ConversationId
@@ -43,7 +47,17 @@ export function createScheduleTask(chat: ScheduleChat, getHarness: () => Harness
           instructions: task.input.text
         })}`
         await runtime.commit(async tx => {
-          const delivery = await chat.enqueue(tx, runtime.conversationId, task.id, `schedule:${task.id}:${at}`, text)
+          const delivery = await chat.enqueue(tx, runtime.conversationId, {
+            schedule: task.id,
+            requestId: `schedule:${task.id}:${at}`,
+            text,
+            owner: {
+              identityId: task.input.ownerIdentityId,
+              account: task.input.ownerAccount,
+              displayName: task.input.ownerName
+            },
+            threadId: task.input.destination.threadId
+          })
           return { status: 'waiting', checkpoint: { phase: 'settle', at, delivery }, on: [delivery], policy: 'allSettled' }
         }, ctx)
       },

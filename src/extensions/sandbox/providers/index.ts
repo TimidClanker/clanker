@@ -15,7 +15,7 @@ export type SandboxProvider = {
   desktop?: boolean
   /** Open or resume the same workspace; renew its lifetime for at least one full tool call. */
   open(
-    workspace: { id: string; established: boolean; scope: 'identity' | 'conversation' },
+    workspace: { id: string; scope: 'identity' | 'conversation' },
     ctx: Context
   ): Promise<{
     env: SandboxEnv

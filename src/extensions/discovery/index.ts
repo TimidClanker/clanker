@@ -10,13 +10,14 @@ import {
   type ConversationId,
   type DocumentReader,
   type EntryId,
-  type EntryRecord
+  type EntryRecord,
+  type Tx
 } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
-import { getIdentity, getParticipants } from 'extensions/identity'
+import { resolveIdentity, getParticipants } from 'extensions/identity'
 
-export const Conversations = defineDoc<{
-  conversations: Record<string, { threadId: string; title: string; summary: string; updatedAt: string }>
+const Conversations = defineDoc<{
+  conversations: Record<string, { title: string; summary: string; updatedAt: string }>
 }>({
   kind: 'clanker.conversations',
   version: 1,
@@ -24,14 +25,7 @@ export const Conversations = defineDoc<{
   initial: () => ({ conversations: {} })
 })
 
-type QuerySource = {
-  id: number
-  url: string
-  newestEntryId: EntryId | null
-  oldestEntryId: EntryId | null
-  nextBefore: EntryId | null
-  truncatedEntryId: EntryId | null
-}
+type QuerySource = { id: number; url: string } & Omit<ReturnType<typeof selectTranscript>, 'messages'>
 
 const Queries = defineDoc<{ queries: Record<string, { conversationId: ConversationId; source: QuerySource }> }>({
   kind: 'clanker.queries',
@@ -66,13 +60,47 @@ const transcript = (entries: readonly EntryRecord[]) =>
     })
   })
 
+function selectTranscript(entries: readonly EntryRecord[], hasMore: boolean, contextWindow: number) {
+  const included: ReturnType<typeof transcript> = []
+  // Leave room for the question, instructions, JSON overhead, and response.
+  let remaining = Math.min(80_000, Math.floor((contextWindow - 8192) / 4))
+  if (remaining < 1000) throw new Error('QUERY_MODEL needs a context window of at least 12,192 tokens')
+  let nextBefore = hasMore ? entries.at(-1)!.id : null
+  let truncatedEntryId: EntryId | null = null
+  for (const message of transcript(entries)) {
+    if (message.text.length > remaining) {
+      if (!included.length) {
+        included.push({ ...message, text: message.text.slice(0, remaining) })
+        truncatedEntryId = message.entryId
+      }
+      nextBefore = included.at(-1)!.entryId
+      break
+    }
+    included.push(message)
+    remaining -= message.text.length + 100
+  }
+  return {
+    messages: included.toReversed(),
+    newestEntryId: included[0]?.entryId ?? null,
+    oldestEntryId: included.at(-1)?.entryId ?? null,
+    nextBefore,
+    truncatedEntryId
+  }
+}
+
 export function createDiscovery(
-  sources: { scope(threadId: string): Promise<string | null>; group(threadId: string): string; url(threadId: string): string },
+  sources: {
+    list(read: DocumentReader, ctx: Context): Promise<{ id: ConversationId; threadId: string }[]>
+    scope(threadId: string): Promise<string | null>
+    group(threadId: string): string
+    url(threadId: string): string
+  },
   queryModel: ReturnType<typeof selectModel>
 ) {
   const visible = async (read: DocumentReader, current: ConversationId, ctx: Context) => {
-    const all = (await read.snapshot(Conversations, ctx))?.conversations ?? {}
-    const origin = all[current]
+    const all = await sources.list(read, ctx)
+    const descriptions = (await read.snapshot(Conversations, ctx))?.conversations ?? {}
+    const origin = all.find(source => source.id === current)
     if (!origin) return []
     // Resolve permissions afresh for each discovery tool call; failures never grant access.
     const scopes = new Map<string, Promise<string | null>>()
@@ -89,17 +117,18 @@ export function createDiscovery(
       return scopes.get(threadId)!
     }
     const ownScope = await access(origin.threadId)
-    const entries = Object.entries(all).filter(([, entry]) => sources.group(entry.threadId) === sources.group(origin.threadId))
-    const allowed = await Promise.all(
-      entries.map(async ([id, entry]) => Number(id) === current || (ownScope !== null && (await access(entry.threadId)) === ownScope))
-    )
+    const entries = all.filter(entry => sources.group(entry.threadId) === sources.group(origin.threadId))
+    const allowed = await Promise.all(entries.map(async entry => entry.id === current || (ownScope !== null && (await access(entry.threadId)) === ownScope)))
     return entries
       .filter((_, index) => allowed[index])
-      .map(([id, entry]) => ({ id: Number(id) as ConversationId, ...entry }))
+      .map(entry => {
+        const description = descriptions[entry.id]
+        return { ...entry, title: description?.title ?? entry.threadId, summary: description?.summary ?? '', updatedAt: description?.updatedAt ?? '' }
+      })
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id - a.id)
   }
 
-  return defineExtension({
+  const extension = defineExtension({
     name: 'discovery',
     sections: [
       section('conversations', input => {
@@ -129,7 +158,7 @@ export function createDiscovery(
             entry => entry.id !== api.conversationId && words.every(word => `${entry.title} ${entry.summary}`.toLowerCase().includes(word))
           )
           if (participantId) {
-            const id = (await getIdentity(api, participantId, ctx)).id
+            const id = await resolveIdentity(api, participantId, ctx)
             const participated = await Promise.all(
               matches.map(async entry => (await getParticipants(api, entry.id, ctx)).some(author => author.identityId === id))
             )
@@ -215,34 +244,9 @@ export function createDiscovery(
                   ),
                 ctx
               )
-              const messages = transcript(page.items)
-              const included: typeof messages = []
-              // Leave room for the question, instructions, JSON overhead, and response.
-              let remaining = Math.min(80_000, Math.floor((queryModel.model.contextWindow - 8192) / 4))
-              if (remaining < 1000) throw new Error('QUERY_MODEL needs a context window of at least 12,192 tokens')
-              let nextBefore = page.next ? page.items.at(-1)!.id : null
-              let truncatedEntryId: EntryId | null = null
-              for (const message of messages) {
-                if (message.text.length > remaining) {
-                  if (!included.length) {
-                    included.push({ ...message, text: message.text.slice(0, remaining) })
-                    truncatedEntryId = message.entryId
-                  }
-                  nextBefore = included.at(-1)!.entryId
-                  break
-                }
-                included.push(message)
-                remaining -= message.text.length + 100
-              }
-              source = {
-                id,
-                url: sources.url(entry.threadId),
-                newestEntryId: included[0]?.entryId ?? null,
-                oldestEntryId: included.at(-1)?.entryId ?? null,
-                nextBefore,
-                truncatedEntryId
-              }
-              content = JSON.stringify({ question, coverage: source, transcript: included.toReversed() })
+              const { messages, ...coverage } = selectTranscript(page.items, !!page.next, queryModel.model.contextWindow)
+              source = { id, url: sources.url(entry.threadId), ...coverage }
+              content = JSON.stringify({ question, coverage: source, transcript: messages })
             }
             query = await api.commit(async tx => {
               const call = await tx.doc(QueryCall, api.taskId)
@@ -293,13 +297,20 @@ export function createDiscovery(
         replay: 'safe',
         execute: async ({ title, summary }, api, ctx) => {
           await api.commit(async tx => {
-            const entry = (await tx.doc(Conversations)).conversations[api.conversationId]!
-            entry.title = title
-            entry.summary = summary
+            const descriptions = (await tx.doc(Conversations)).conversations
+            descriptions[api.conversationId] = { title, summary, updatedAt: descriptions[api.conversationId]?.updatedAt ?? new Date().toISOString() }
           }, ctx)
           return result({ updated: true })
         }
       })
     ]
   })
+  return {
+    extension,
+    async record(tx: Tx, id: ConversationId, text: string) {
+      const descriptions = (await tx.doc(Conversations)).conversations
+      const entry = (descriptions[id] ??= { title: text.slice(0, 100), summary: text.slice(0, 600), updatedAt: '' })
+      entry.updatedAt = new Date().toISOString()
+    }
+  }
 }
