@@ -19,7 +19,7 @@ export async function prepareConversation(tx: Tx, threadId: string, agent: Agent
 
 export async function connectChat(
   chat: Chat,
-  harness: Harness,
+  useAgent: (work: (harness: Harness) => Promise<void>) => Promise<void>,
   Reply: ReturnType<typeof createDelivery>,
   model: ReturnType<typeof selectModel>['model'],
   agentFor: (threadId: string) => AgentChange,
@@ -45,40 +45,45 @@ export async function connectChat(
       return
     }
     await thread.subscribe()
-    await harness.commit(async tx => {
-      const id = await prepareConversation(tx, thread.id, agentFor(thread.id))
-      const messages = await tx.doc(Messages, id)
-      if (messages.received[message.id]) return
-      const author = await recordMessageAuthor(
-        tx,
-        id,
-        message.id,
-        platformFor(chat, thread.id).identifyAuthor(thread.id, message.author),
-        message.author.fullName || message.author.userName
-      )
-      await onMessage?.(tx, id, message.text.trim() || 'Image discussion')
-      const task = await tx.createTask(
-        Reply,
-        {
-          threadId: thread.id,
-          messageId: message.id,
-          text: `Sender: ${JSON.stringify({ messageId: message.id, identityId: author.identityId, displayName: author.displayName })}\n${message.text.trim() || 'Please describe this image.'}`,
-          images,
-          previous: messages.lastTask
-        },
-        { conversationId: id, ownership: { kind: 'conversation' } }
-      )
-      messages.received[message.id] = task
-      messages.lastTask = task
-    }, context)
-    harness.resume()
+    await useAgent(async harness => {
+      await harness.commit(async tx => {
+        const id = await prepareConversation(tx, thread.id, agentFor(thread.id))
+        const messages = await tx.doc(Messages, id)
+        if (messages.received[message.id]) return
+        const author = await recordMessageAuthor(
+          tx,
+          id,
+          message.id,
+          platformFor(chat, thread.id).identifyAuthor(thread.id, message.author),
+          message.author.fullName || message.author.userName
+        )
+        await onMessage?.(tx, id, message.text.trim() || 'Image discussion')
+        const task = await tx.createTask(
+          Reply,
+          {
+            threadId: thread.id,
+            messageId: message.id,
+            text: `Sender: ${JSON.stringify({ messageId: message.id, identityId: author.identityId, displayName: author.displayName })}\n${message.text.trim() || 'Please describe this image.'}`,
+            images,
+            previous: messages.lastTask
+          },
+          { conversationId: id, ownership: { kind: 'conversation' } }
+        )
+        messages.received[message.id] = task
+        messages.lastTask = task
+      }, context)
+      harness.resume()
+    })
   }
   chat.onNewMention(receive)
   chat.onDirectMessage(receive)
   chat.onSubscribedMessage(receive)
+  await useAgent(async () => {})
+}
+
+export async function restoreChat(chat: Chat, harness: Harness, agentFor: (threadId: string) => AgentChange) {
   for (const [threadId, id] of Object.entries((await harness.snapshot(Threads, context))?.threads ?? {})) {
     await harness.commit(tx => configure(tx, id, agentFor(threadId)), context)
     await chat.thread(threadId).subscribe()
   }
-  harness.resume()
 }

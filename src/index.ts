@@ -1,7 +1,4 @@
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
-import type { Harness } from '@earendil-works/pi-durable'
-
-import { openAgent } from 'agent'
+import { createRuntime } from 'runtime'
 import { createChatIntegration } from 'extensions/chat'
 import { createDiscovery } from 'extensions/discovery'
 import { createWeb } from 'extensions/web'
@@ -11,7 +8,6 @@ import { createSandbox } from 'extensions/sandbox'
 import { Vercel } from 'extensions/sandbox/providers/vercel'
 import { models } from 'auth/store'
 import { modelSelection, selectModel } from 'model'
-import { openStorage } from 'storage'
 
 async function main() {
   const { model, thinkingLevel } = selectModel(modelSelection)
@@ -21,9 +17,11 @@ async function main() {
     throw new Error(`No credentials for ${model.provider}. Run bun run login ${model.provider} or configure its API key environment variable.`)
 
   const cleanup = new AsyncDisposableStack()
+  const shutdown = new AbortController()
   let closing: Promise<void> | undefined
   const close = () =>
     (closing ??= (async () => {
+      shutdown.abort(new Error('Clanker is shutting down'))
       // Bound every shutdown path so a stuck operation cannot retain database ownership.
       const timeout = setTimeout(() => {
         console.error('[clanker] Shutdown timed out; exiting to release the database lock.')
@@ -39,28 +37,31 @@ async function main() {
   const stop = () => {
     void close().catch(error => console.error('[clanker] Shutdown failed', error))
   }
+  process.once('SIGINT', stop)
+  process.once('SIGTERM', stop)
   try {
-    const storage = await openStorage()
-    cleanup.defer(() => storage.close(BACKGROUND_CONTEXT))
-    const chat = createChatIntegration({ model, thinkingLevel })
+    let runtime: ReturnType<typeof createRuntime>
+    const chat = createChatIntegration({ model, thinkingLevel }, () => runtime.get())
     cleanup.defer(() => chat.close())
     const discovery = createDiscovery(chat.discovery, queryModel)
-    let harness: Harness
     const sandboxProvider = new Vercel()
-    const sandbox = (await sandboxProvider.isConfigured()) ? createSandbox(chat.sandbox, () => harness, sandboxProvider) : undefined
+    const sandbox = (await sandboxProvider.isConfigured()) ? createSandbox(chat.sandbox, () => runtime.get(), sandboxProvider) : undefined
     cleanup.defer(() => sandbox?.close())
-    harness = await openAgent(storage, models, [
-      createIdentity(chat.identity),
-      chat.extension,
-      createSchedules(chat.schedules, () => harness),
-      discovery.extension,
-      createWeb(models, selectModel(process.env.SEARCH_MODEL ?? modelSelection)),
-      ...(sandbox ? [sandbox.extension] : [])
-    ])
-    cleanup.defer(() => harness.close(BACKGROUND_CONTEXT))
-    process.once('SIGINT', stop)
-    process.once('SIGTERM', stop)
-    await chat.connect(harness, discovery.record)
+    runtime = createRuntime(
+      models,
+      [
+        createIdentity(chat.identity),
+        chat.extension,
+        createSchedules(chat.schedules, () => runtime.get()),
+        discovery.extension,
+        createWeb(models, selectModel(process.env.SEARCH_MODEL ?? modelSelection)),
+        ...(sandbox ? [sandbox.extension] : [])
+      ],
+      shutdown.signal,
+      chat.restore
+    )
+    cleanup.defer(() => runtime.finished)
+    await Promise.race([runtime.finished, chat.connect(runtime.use, discovery.record)])
   } finally {
     process.off('SIGINT', stop)
     process.off('SIGTERM', stop)

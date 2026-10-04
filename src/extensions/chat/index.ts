@@ -6,14 +6,18 @@ import type { selectModel } from 'model'
 import { recordAutomatedInput, type IdentityAccess } from 'extensions/identity'
 import { Discord } from 'extensions/chat/adapters/discord'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
-import { connectChat, prepareConversation } from 'extensions/chat/bridge'
+import { connectChat, prepareConversation, restoreChat } from 'extensions/chat/bridge'
 import { createDelivery } from 'extensions/chat/delivery'
 import { createPost } from 'extensions/chat/post'
 import { listSources, threadFor, Messages } from 'extensions/chat/state'
 import type { ScheduleChat } from 'extensions/schedules'
 import type { SandboxAccess } from 'extensions/sandbox'
 
-export function createChatIntegration(selection: ReturnType<typeof selectModel>, adapters: Record<string, PlatformAdapter> = { discord: new Discord() }) {
+export function createChatIntegration(
+  selection: ReturnType<typeof selectModel>,
+  getHarness: () => Harness,
+  adapters: Record<string, PlatformAdapter> = { discord: new Discord() }
+) {
   const chat = new Chat({
     userName: 'clanker',
     adapters,
@@ -21,12 +25,11 @@ export function createChatIntegration(selection: ReturnType<typeof selectModel>,
     concurrency: { strategy: 'concurrent', maxConcurrent: 1 },
     logger: 'info'
   })
-  let harness: Harness
   const shutdown = new AbortController()
   let listening: Promise<unknown> = Promise.resolve()
   let closing: Promise<void> | undefined
   const Post = createPost(chat)
-  const Reply = createDelivery(chat, () => harness, Post)
+  const Reply = createDelivery(chat, getHarness, Post)
   const rename = defineTool({
     name: 'rename_thread',
     description:
@@ -58,7 +61,7 @@ export function createChatIntegration(selection: ReturnType<typeof selectModel>,
     } satisfies SandboxAccess,
     schedules: {
       async resolve(source, account, reference, ctx) {
-        const threadId = await threadFor(harness, source, ctx)
+        const threadId = await threadFor(getHarness(), source, ctx)
         const platform = platformFor(chat, threadId)
         if (!platform.resolveDestination) throw new Error('This platform does not support directing tasks to other channels')
         return platform.resolveDestination(threadId, account, reference ?? threadId)
@@ -118,10 +121,13 @@ export function createChatIntegration(selection: ReturnType<typeof selectModel>,
       url: (threadId: string) => platformFor(chat, threadId).sourceUrl?.(threadId) ?? ''
     },
     webhooks: chat.webhooks,
-    async connect(agent: Harness, onMessage?: Parameters<typeof connectChat>[5]) {
-      harness = agent
+    async restore(harness: Harness) {
       await chat.initialize()
-      await connectChat(chat, harness, Reply, selection.model, agentFor, onMessage)
+      await restoreChat(chat, harness, agentFor)
+    },
+    async connect(useAgent: Parameters<typeof connectChat>[1], onMessage?: Parameters<typeof connectChat>[5]) {
+      await chat.initialize()
+      await connectChat(chat, useAgent, Reply, selection.model, agentFor, onMessage)
       listening = Promise.all(Object.values(adapters).map(adapter => adapter.start?.(shutdown.signal)))
       try {
         await listening
