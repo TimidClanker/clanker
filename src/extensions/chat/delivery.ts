@@ -91,17 +91,22 @@ export function createDelivery(chat: Chat, getHarness: () => Harness, Post: Retu
         await runtime.commit(async tx => {
           let text = 'Sorry, I could not generate a response. Please try again.'
           if (settled.status === 'done' && settled.type === 'input') {
+            const messages = await tx.doc(Messages, runtime.conversationId)
             // Several steers can share an answer. Deliver each distinct answer once, in order.
-            if ((await tx.doc(Messages, runtime.conversationId)).lastAnswer === settled.answer) {
+            if (messages.lastAnswer === settled.answer) {
               return { status: 'terminal', outcome: { status: 'completed', result: null } }
             }
             const entry = await tx.entry(AssistantEntry, settled.answer)
             const answer = entry!.model![0] as AssistantMessage
-            text =
-              answer.content
-                .flatMap(part => (part.type === 'text' ? [part.text] : []))
-                .join('\n')
-                .trim() || text
+            text = answer.content
+              .flatMap(part => (part.type === 'text' ? [part.text] : []))
+              .join('\n')
+              .trim()
+            // A successful turn may have delivered its response through a tool, such as an image upload.
+            if (!text) {
+              messages.lastAnswer = settled.answer
+              return { status: 'terminal', outcome: { status: 'completed', result: null } }
+            }
           }
           return {
             status: 'running',

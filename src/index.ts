@@ -2,6 +2,9 @@ import { createRuntime } from 'runtime'
 import { createChatIntegration } from 'extensions/chat'
 import { createDiscovery } from 'extensions/discovery'
 import { createWeb } from 'extensions/web'
+import { createMediaGen } from 'extensions/media-gen'
+import { OpenAICodex } from 'extensions/media-gen/providers/openai-codex'
+import { OpenRouter } from 'extensions/media-gen/providers/openrouter'
 import { createIdentity } from 'extensions/identity'
 import { createSchedules } from 'extensions/schedules'
 import { createSandbox } from 'extensions/sandbox'
@@ -55,6 +58,7 @@ async function main() {
         createSchedules(chat.schedules, () => runtime.get()),
         discovery.extension,
         createWeb(models, selectModel(process.env.SEARCH_MODEL ?? modelSelection)),
+        createMediaGen([new OpenAICodex(models), new OpenRouter(models)], chat.media),
         ...(sandbox ? [sandbox.extension] : [])
       ],
       shutdown.signal,

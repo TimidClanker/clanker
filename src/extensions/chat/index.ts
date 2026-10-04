@@ -1,3 +1,4 @@
+import { MIMEType } from 'node:util'
 import { Chat } from 'chat'
 import { createMemoryState } from '@chat-adapter/state-memory'
 import { Type } from '@earendil-works/pi-ai'
@@ -12,6 +13,7 @@ import { createPost } from 'extensions/chat/post'
 import { listSources, threadFor, Messages } from 'extensions/chat/state'
 import type { ScheduleChat } from 'extensions/schedules'
 import type { SandboxAccess } from 'extensions/sandbox'
+import type { MediaDelivery } from 'extensions/media-gen'
 
 export function createChatIntegration(
   selection: ReturnType<typeof selectModel>,
@@ -51,6 +53,25 @@ export function createChatIntegration(
   })
 
   return {
+    media: (async (images, api, ctx) => {
+      const threadId = await threadFor(api, api.conversationId, ctx)
+      const post = await api.createTask(
+        Post,
+        {
+          threadId,
+          text: '',
+          files: images.map((image, index) => ({
+            data: image.data,
+            mimeType: image.mimeType,
+            filename: `generated-${index + 1}.${new MIMEType(image.mimeType).subtype.replace('svg+xml', 'svg')}`
+          }))
+        },
+        { ownership: { kind: 'conversation' } },
+        ctx
+      )
+      const task = await api.waitForTask(post, ctx)
+      if (task.state.outcome.status !== 'completed') throw new Error('Generated images could not be delivered to chat.')
+    }) satisfies MediaDelivery,
     sandbox: {
       async audience(read, conversationId, accounts, ctx) {
         const threadId = await threadFor(read, conversationId, ctx)

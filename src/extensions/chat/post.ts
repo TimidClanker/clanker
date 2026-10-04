@@ -3,7 +3,11 @@ import type { Chat } from 'chat'
 import { platformFor } from 'extensions/chat/adapters'
 
 export function createPost(chat: Chat) {
-  return defineTask<{ threadId: string; text: string }, { phase: 'send'; text: string; attempt?: number; retryAt?: number }, null>({
+  return defineTask<
+    { threadId: string; text: string; files?: { data: string; filename: string; mimeType: string }[] },
+    { phase: 'send'; text: string; attempt?: number; retryAt?: number },
+    null
+  >({
     name: 'chat.post',
     version: 1,
     initial: input => ({ phase: 'send', text: input.text }),
@@ -16,7 +20,11 @@ export function createPost(chat: Chat) {
         ctx.abortSignal?.throwIfAborted()
         // A platform accepting a post before this checkpoint remains the unavoidable duplicate-delivery window.
         try {
-          await thread.post({ raw: chunk })
+          await thread.post({
+            raw: chunk,
+            // Attach files to the first chunk only. Retries reuse the persisted bytes.
+            files: text === task.input.text ? task.input.files?.map(file => ({ ...file, data: Buffer.from(file.data, 'base64') })) : undefined
+          })
         } catch (error) {
           ctx.abortSignal?.throwIfAborted()
           const message = error instanceof Error ? error.message : String(error)
