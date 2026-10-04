@@ -4,7 +4,7 @@ import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section, type Harness } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
 import { Conversations } from 'extensions/discovery'
-import { recordAutomatedInput, type IdentityAccess } from 'extensions/identity'
+import { findIdentity, getIdentity, recordAutomatedInput, type IdentityAccess } from 'extensions/identity'
 import { Discord } from 'extensions/chat/adapters/discord'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 import { connectChat, prepareConversation } from 'extensions/chat/bridge'
@@ -12,6 +12,8 @@ import { createDelivery } from 'extensions/chat/delivery'
 import { createPost } from 'extensions/chat/post'
 import { Messages } from 'extensions/chat/state'
 import type { ScheduleChat } from 'extensions/schedules'
+import type { ScheduleInput } from 'extensions/schedules/task'
+import type { SandboxAccess } from 'extensions/sandbox'
 
 export function createChatIntegration(
   selection: ReturnType<typeof selectModel>,
@@ -52,6 +54,22 @@ export function createChatIntegration(
   })
 
   return {
+    sandbox: {
+      async resolve(read, conversationId, accounts, ctx) {
+        if (!accounts.length) throw new Error('Sandbox access requires a verified requester')
+        const entry = (await read.snapshot(Conversations, ctx))?.conversations[conversationId]
+        if (!entry) throw new Error('Sandbox access requires a chat conversation')
+        const platform = platformFor(chat, entry.threadId)
+        if (!platform.sandboxAudience) throw new Error('This platform cannot verify sandbox membership')
+        const recipient = await platform.sandboxAudience(entry.threadId, accounts)
+        if (!recipient) return { kind: 'conversation', id: String(conversationId) }
+        const id = await findIdentity(read, recipient, ctx)
+        if (!id || (await Promise.all(accounts.map(account => findIdentity(read, account, ctx)))).some(author => author !== id)) {
+          throw new Error('Private sandbox access requires the verified recipient')
+        }
+        return { kind: 'identity', id, aliases: (await getIdentity(read, id, ctx)).aliases }
+      }
+    } satisfies SandboxAccess,
     schedules: {
       async resolve(source, account, reference, ctx) {
         const current = (await harness.snapshot(Conversations, ctx))?.conversations[source]
@@ -70,7 +88,12 @@ export function createChatIntegration(
       async enqueue(tx, conversationId, schedule, requestId, text) {
         const destination = (await tx.doc(Conversations)).conversations[conversationId]
         if (!destination) throw new Error('No chat thread is associated with this schedule')
-        await recordAutomatedInput(tx, conversationId, requestId)
+        const owner = (await tx.task(schedule))!.input as ScheduleInput
+        await recordAutomatedInput(tx, conversationId, requestId, {
+          identityId: owner.ownerIdentityId,
+          account: owner.ownerAccount,
+          displayName: owner.ownerName
+        })
         const messages = await tx.doc(Messages, conversationId)
         const reply = await tx.createTask(
           Reply,

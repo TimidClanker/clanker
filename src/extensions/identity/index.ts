@@ -8,6 +8,7 @@ export {
   getIdentity,
   getMessageAuthor,
   getRequestAuthor,
+  getRequestActors,
   getParticipants,
   linkIdentities,
   recordMessageAuthor,

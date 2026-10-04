@@ -12,7 +12,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-ENV NODE_ENV=production DATABASE_PATH=/app/workspace/durable.sqlite SECRETS_DIR=/app/secrets
+ENV NODE_ENV=production SECRETS_DIR=/app/secrets
 COPY --from=dependencies --chown=bun:bun /app/node_modules ./node_modules
 COPY --chown=bun:bun package.json bun.lock LICENSE ./
 COPY --chown=bun:bun src ./src

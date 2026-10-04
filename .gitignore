@@ -39,3 +39,5 @@ secrets/
 .DS_Store
 node_modules/
 dist/
+.vercel
+.env*

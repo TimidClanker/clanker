@@ -1,0 +1,33 @@
+FROM vcr.vercel.com/vercel/sandbox/universal:latest
+
+USER root
+ARG PLAYWRIGHT_VERSION=1.63.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
+    DISPLAY=:99 \
+    DESKTOP_DIR=/vercel/desktop \
+    DESKTOP_SIZE=1440x900
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        xvfb openbox x11vnc novnc websockify dbus-x11 tini xterm xdotool x11-utils fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/clanker/desktop
+RUN bun add --exact playwright@${PLAYWRIGHT_VERSION} \
+    && bun node_modules/playwright/cli.js install --with-deps --no-shell chromium \
+    && chmod -R a+rX /opt/playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY sandbox/desktop/browser.mjs ./browser.mjs
+COPY --chmod=755 sandbox/desktop/start.sh /usr/local/bin/sandbox-desktop
+RUN mkdir -p /vercel/desktop /vercel/sandbox \
+    && chown ubuntu:ubuntu /vercel/desktop /vercel/sandbox
+
+USER ubuntu
+WORKDIR /vercel/sandbox
+EXPOSE 6080
+
+# Set distinct DESKTOP_VIEW_PASSWORD and DESKTOP_CONTROL_PASSWORD at runtime.
+# Each must be 8 characters: letters, digits, + or / (VNC's password limit).
+# Vercel ignores CMD: expose port 6080 and run sandbox-desktop with detached: true.
+CMD ["sandbox-desktop"]

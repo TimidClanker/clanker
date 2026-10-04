@@ -4,6 +4,12 @@ import type { PlatformAccount } from 'extensions/identity'
 import { discordDestination } from 'extensions/chat/adapters/discord-destination'
 
 export class Discord extends DiscordAdapter {
+  // Recheck platform membership, including private-thread membership and channel permissions.
+  async sandboxAudience(threadId: string, accounts: PlatformAccount[]) {
+    await Promise.all(accounts.map(account => this.resolveDestination(threadId, account, threadId)))
+    return this.privateRecipient(threadId)
+  }
+
   async resolveDestination(threadId: string, account: PlatformAccount, reference: string) {
     const destination = await discordDestination(
       path => this.discordFetch(path, 'GET'),

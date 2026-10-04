@@ -24,7 +24,7 @@ const ConversationIdentities = defineDoc<{
 
 const accountKey = ({ platform, scope, userId }: PlatformAccount) => JSON.stringify([platform, scope, userId])
 
-const AutomatedInputs = defineDoc<Record<string, true>>({
+const AutomatedInputs = defineDoc<Record<string, true | Author>>({
   kind: 'identity.automated-inputs',
   version: 1,
   scope: 'conversation',
@@ -34,8 +34,8 @@ const AutomatedInputs = defineDoc<Record<string, true>>({
 })
 
 /** Host-only provenance: automated input is not a new user authorization, even when it names an owner. */
-export async function recordAutomatedInput(tx: Tx, conversationId: ConversationId, requestId: string) {
-  ;(await tx.doc(AutomatedInputs, conversationId))[JSON.stringify(requestId)] = true
+export async function recordAutomatedInput(tx: Tx, conversationId: ConversationId, requestId: string, owner?: Author) {
+  ;(await tx.doc(AutomatedInputs, conversationId))[JSON.stringify(requestId)] = owner ?? true
 }
 
 function canonicalId(identities: Record<string, { linkedTo?: string }>, id: string): string {
@@ -113,22 +113,40 @@ export async function getMessageAuthor(read: DocumentReader, conversationId: Con
 
 /** Authority for user-owned actions comes from admitted input, never a model-supplied identity ID. */
 export async function getRequestAuthor(api: ToolExecutionApi, harness: Pick<Harness, 'submission'>, ctx: Context): Promise<Author> {
-  const inputs = (await api.snapshot(LiveDoc, api.conversationId, ctx))?.run?.inputs ?? []
-  const automated = await api.snapshot(AutomatedInputs, api.conversationId, ctx)
-  const authors = (
-    await Promise.all(
-      inputs.map(async id => {
-        const submission = await harness.submission(id, ctx)
-        const record = await submission?.status(ctx)
-        if (record?.requestId && automated?.[JSON.stringify(record.requestId)]) return null
-        return record?.requestId ? getMessageAuthor(api, api.conversationId, record.requestId, ctx) : undefined
-      })
-    )
-  ).filter(author => author !== null)
-  if (!authors.length || authors.some(author => !author) || new Set(authors.map(author => author!.identityId)).size !== 1) {
+  const authors = await getRequestActors(api, harness, api.conversationId, ctx)
+  if (!authors.length || new Set(authors.map(author => author.identityId)).size !== 1) {
     throw new Error(
       'This action needs a request from one verified user. If several people contributed to this run, ask the owner to repeat the request separately.'
     )
   }
   return authors.at(-1)!
+}
+
+/** Host provenance for admitted inputs. Scheduled owners are opt-in; they cannot authorize new user-owned actions. */
+export async function getRequestActors(
+  read: DocumentReader,
+  harness: Pick<Harness, 'submission'>,
+  conversationId: ConversationId,
+  ctx: Context,
+  includeAutomated = false
+): Promise<Author[]> {
+  const inputs = (await read.snapshot(LiveDoc, conversationId, ctx))?.run?.inputs ?? []
+  const automated = await read.snapshot(AutomatedInputs, conversationId, ctx)
+  const authors = (
+    await Promise.all(
+      inputs.map(async id => {
+        const submission = await harness.submission(id, ctx)
+        const record = await submission?.status(ctx)
+        const owner = record?.requestId ? automated?.[JSON.stringify(record.requestId)] : undefined
+        if (owner) {
+          if (!includeAutomated) return null
+          if (owner === true) return undefined
+          return { ...owner, identityId: (await getIdentity(read, owner.identityId, ctx)).id }
+        }
+        return record?.requestId ? getMessageAuthor(read, conversationId, record.requestId, ctx) : undefined
+      })
+    )
+  ).filter(author => author !== null)
+  if (authors.some(author => !author)) throw new Error('An admitted input has no verified author')
+  return authors as Author[]
 }
