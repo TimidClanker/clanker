@@ -29,14 +29,14 @@ const codes: Record<string, FileErrorCode> = {
 }
 
 export class VercelEnv implements ExecutionEnv {
-  cwd = '/vercel/sandbox'
   readonly id: string
   readonly desktop: VercelDesktop
   private active = new Map<string, Command | undefined>()
 
   constructor(
     private sandbox: Sandbox,
-    private home: string
+    private home: string,
+    readonly cwd = '/vercel/sandbox'
   ) {
     this.id = `vercel:${sandbox.name}`
     this.desktop = new VercelDesktop(sandbox)

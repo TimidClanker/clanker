@@ -5,7 +5,12 @@ ARG PLAYWRIGHT_VERSION=1.63.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
     DISPLAY=:99 \
     DESKTOP_DIR=/vercel/desktop \
-    DESKTOP_SIZE=1440x900
+    DESKTOP_SIZE=1440x900 \
+    AGENT_BROWSER_CDP=9222 \
+    AGENT_BROWSER_SESSION=desktop \
+    AGENT_BROWSER_SOCKET_DIR=/tmp/clanker-desktop-runtime/agent-browser \
+    AGENT_BROWSER_IDLE_TIMEOUT_MS=0 \
+    AGENT_BROWSER_DEFAULT_TIMEOUT=10000
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -17,6 +22,12 @@ RUN bun add --exact playwright@${PLAYWRIGHT_VERSION} \
     && bun node_modules/playwright/cli.js install --with-deps --no-shell chromium \
     && chmod -R a+rX /opt/playwright \
     && rm -rf /var/lib/apt/lists/*
+
+ARG AGENT_BROWSER_VERSION=0.38.2
+RUN bun add --exact agent-browser@${AGENT_BROWSER_VERSION} \
+    && ln -s "/opt/clanker/desktop/node_modules/agent-browser/bin/agent-browser-linux-$(bun -p process.arch)" /usr/local/bin/agent-browser \
+    && chmod +x /usr/local/bin/agent-browser \
+    && agent-browser --version
 
 COPY sandbox/desktop/browser.mjs ./browser.mjs
 COPY --chmod=755 sandbox/desktop/start.sh /usr/local/bin/sandbox-desktop

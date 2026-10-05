@@ -68,13 +68,14 @@ export class VercelDesktop {
           args: [
             '-e',
             `
+            const tooling = await Bun.file('/usr/local/bin/agent-browser').exists()
             for (let attempt = 0; attempt < 100; attempt++) {
               try {
                 const responses = await Promise.all([
                   fetch('http://127.0.0.1:6080/vnc.html', { signal: AbortSignal.timeout(1000) }),
                   fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(1000) })
                 ])
-                if (responses.every(response => response.ok)) process.exit(0)
+                if (responses.every(response => response.ok) && (!tooling || await Bun.file('${directory}/browser-ready').exists())) process.exit(0)
               } catch {}
               await Bun.sleep(200)
             }
