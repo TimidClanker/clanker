@@ -1,0 +1,3 @@
+[install]
+# Wait three days before resolving newly published package versions.
+minimumReleaseAge = 259200
