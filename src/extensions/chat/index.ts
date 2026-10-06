@@ -6,6 +6,7 @@ import { defineExtension, defineTool, section, type Harness } from '@earendil-wo
 import type { selectModel } from 'model'
 import { recordAutomatedInput, type IdentityAccess } from 'extensions/identity'
 import { Discord } from 'extensions/chat/adapters/discord'
+import { Beeper } from 'extensions/chat/adapters/beeper'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 import { connectChat, prepareConversation, restoreChat } from 'extensions/chat/bridge'
 import { createDelivery } from 'extensions/chat/delivery'
@@ -18,7 +19,10 @@ import type { MediaDelivery } from 'extensions/media-gen'
 export function createChatIntegration(
   selection: ReturnType<typeof selectModel>,
   getHarness: () => Harness,
-  adapters: Record<string, PlatformAdapter> = { discord: new Discord() }
+  adapters: Record<string, PlatformAdapter> = {
+    discord: new Discord(),
+    ...(process.env.BEEPER_ENABLED === 'true' ? { beeper: new Beeper() } : {})
+  }
 ) {
   const chat = new Chat({
     userName: 'clanker',

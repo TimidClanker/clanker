@@ -8,7 +8,7 @@ import { Threads, Messages } from 'extensions/chat/state'
 import { downloadImages } from 'extensions/chat/attachments'
 import { showTyping } from 'extensions/chat/typing'
 import type { createDelivery } from 'extensions/chat/delivery'
-import { platformFor } from 'extensions/chat/adapters'
+import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 
 export async function prepareConversation(tx: Tx, threadId: string, agent: AgentChange) {
   const directory = await tx.doc(Threads)
@@ -83,6 +83,8 @@ export async function connectChat(
 
 export async function restoreChat(chat: Chat, harness: Harness, agentFor: (threadId: string) => AgentChange) {
   for (const [threadId, id] of Object.entries((await harness.snapshot(Threads, context))?.threads ?? {})) {
+    const adapter = chat.getAdapter(threadId.split(':')[0]!) as PlatformAdapter | undefined
+    if (!adapter || adapter.acceptsThread?.(threadId) === false) continue
     await harness.commit(tx => configure(tx, id, agentFor(threadId)), context)
     await chat.thread(threadId).subscribe()
   }

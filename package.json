@@ -8,11 +8,13 @@
     "dev": "bun run --watch src/index.ts",
     "auth": "bun run src/auth/cli.ts",
     "login": "bun run src/auth/cli.ts login",
+    "beeper": "bun run src/extensions/chat/adapters/beeper/cli.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@beeper/desktop-api": "6.0.0",
     "@chat-adapter/discord": "4.40.0",
     "@chat-adapter/state-memory": "4.40.0",
     "@earendil-works/chord": "1.0.0",
