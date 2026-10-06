@@ -23,10 +23,12 @@ export async function connectChat(
   Reply: ReturnType<typeof createDelivery>,
   model: ReturnType<typeof selectModel>['model'],
   agentFor: (threadId: string) => AgentChange,
-  onMessage?: (tx: Tx, id: ConversationId, text: string) => Promise<void>
+  onMessage?: (tx: Tx, id: ConversationId, text: string) => Promise<void>,
+  onControlMessage?: (thread: Thread, message: Message) => Promise<boolean>
 ) {
   const receive = async (thread: Thread, message: Message) => {
     if (message.author.isBot) return
+    if (await onControlMessage?.(thread, message)) return
     using typing = showTyping(thread)
     const attachments = message.attachments.filter(attachment => attachment.type === 'image' || attachment.mimeType?.startsWith('image/'))
     if (!message.text.trim() && !attachments.length) {

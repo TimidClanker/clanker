@@ -1,7 +1,7 @@
 import { mkdir, chmod } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import BeeperDesktop from '@beeper/desktop-api'
-import { beeperConfig, credentialsPath } from './config'
+import { beeperConfig, credentialsPath } from 'extensions/chat/adapters/beeper/config'
 
 async function main() {
   const [command, ...accountIDs] = Bun.argv.slice(2)
@@ -18,7 +18,7 @@ async function main() {
     const accounts = await new BeeperDesktop(config).accounts.list()
     for (const id of accountIDs) if (!accounts.some(account => account.accountID === id)) throw new Error(`Unknown Beeper account: ${id}`)
     await save({ ...config, accountIDs })
-    console.log('Saved Beeper account selection. Set BEEPER_ENABLED=true to enable the adapter alongside Discord.')
+    console.log('Saved Beeper account selection. The adapter will be enabled alongside Discord on the next start.')
     return
   }
   if (command !== 'login') {

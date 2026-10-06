@@ -44,7 +44,11 @@ async function main() {
   process.once('SIGTERM', stop)
   try {
     let runtime: ReturnType<typeof createRuntime>
-    const chat = createChatIntegration({ model, thinkingLevel }, () => runtime.get())
+    const chat = await createChatIntegration(
+      { model, thinkingLevel },
+      () => runtime.get(),
+      work => runtime.use(work)
+    )
     cleanup.defer(() => chat.close())
     const discovery = createDiscovery(chat.discovery, queryModel)
     const sandboxProvider = new Vercel()
@@ -65,7 +69,7 @@ async function main() {
       chat.restore
     )
     cleanup.defer(() => runtime.finished)
-    await Promise.race([runtime.finished, chat.connect(runtime.use, discovery.record)])
+    await Promise.race([runtime.finished, chat.connect(discovery.record)])
   } finally {
     process.off('SIGINT', stop)
     process.off('SIGTERM', stop)

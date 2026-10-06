@@ -1,5 +1,3 @@
-import { mkdir, rename } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
 import BeeperDesktop from '@beeper/desktop-api'
 import {
   BaseFormatConverter,
@@ -16,7 +14,8 @@ import {
 } from 'chat'
 import type { PlatformAdapter } from 'extensions/chat/adapters'
 import type { PlatformAccount } from 'extensions/identity'
-import { beeperConfig } from './config'
+import type { beeperConfig } from 'extensions/chat/adapters/beeper/config'
+import type { BeeperCheckpoint } from 'extensions/chat/adapters/beeper/state'
 
 const format = new (class extends BaseFormatConverter {
   toAst = parseMarkdown
@@ -29,26 +28,30 @@ export class Beeper implements PlatformAdapter {
   readonly userName = 'clanker'
   private chat!: ChatInstance
   private client!: BeeperDesktop
-  private config!: Awaited<ReturnType<typeof beeperConfig>>
   private chats = new Map<string, BeeperDesktop.Chat>()
+  private networks = new Map<string, string>()
   private seen = new Set<string>()
   private socket?: WebSocket
   private shutdown = new AbortController()
   private pending: Promise<unknown> = Promise.resolve()
-  private checkpoint!: { since: number; syncedAt: number }
-  private checkpointPath!: string
+  private checkpoint!: BeeperCheckpoint
+  private checkpointScope!: string
 
-  constructor(private options: Partial<Awaited<ReturnType<typeof beeperConfig>>> = {}) {}
+  constructor(
+    private config: Awaited<ReturnType<typeof beeperConfig>>,
+    private checkpoints: {
+      load(scope: string): Promise<BeeperCheckpoint>
+      save(scope: string, checkpoint: BeeperCheckpoint): Promise<void>
+    }
+  ) {}
 
   async initialize(chat: ChatInstance) {
     this.chat = chat
-    this.config = { ...(await beeperConfig()), ...this.options }
     if (!this.config.accessToken) throw new Error('Beeper needs authentication. Run bun run beeper login.')
     if (!this.config.accountIDs.length) throw new Error('Select Beeper accounts with bun run beeper use <account-id>.')
     this.client = new BeeperDesktop({ ...this.config, maxRetries: 0, timeout: 15_000 })
     // A separate cursor per endpoint/account selection prevents replaying another account's history.
-    const scope = new Bun.CryptoHasher('sha256').update(JSON.stringify([this.config.baseURL, [...this.config.accountIDs].sort()])).digest('hex')
-    this.checkpointPath = resolve(process.env.BEEPER_STATE_DIR || './workspace/beeper', `${scope}.json`)
+    this.checkpointScope = JSON.stringify([this.config.baseURL, [...this.config.accountIDs].sort()])
   }
 
   encodeThreadId(data: { accountID: string; chatID: string }) {
@@ -73,6 +76,20 @@ export class Beeper implements PlatformAdapter {
 
   identifyAuthor(threadId: string, author: Author) {
     return { platform: 'beeper', scope: this.decodeThreadId(threadId).accountID, userId: author.userId }
+  }
+
+  async accountLabel(threadId: string, account: PlatformAccount) {
+    const chat = await this.conversation(threadId)
+    if (account.platform !== this.name || account.scope !== chat.accountID) throw new Error('Account does not belong to this Beeper conversation')
+    const user = chat.participants.items.find(user => user.id === account.userId)
+    const handle = user?.phoneNumber || user?.username || user?.email
+    let network = this.networks.get(chat.accountID)
+    if (!network) {
+      network = (await this.client.accounts.retrieve(chat.accountID)).network || 'Beeper'
+      this.networks.set(chat.accountID, network)
+    }
+    const label = network === 'Google Voice' ? 'Phone Number' : network
+    return handle && handle !== account.userId ? `${label} (${handle})` : label
   }
 
   discoveryGroup(threadId: string) {
@@ -241,12 +258,6 @@ export class Beeper implements PlatformAdapter {
     return task
   }
 
-  private async saveCheckpoint() {
-    await mkdir(dirname(this.checkpointPath), { recursive: true })
-    await Bun.write(`${this.checkpointPath}.tmp`, JSON.stringify(this.checkpoint))
-    await rename(`${this.checkpointPath}.tmp`, this.checkpointPath)
-  }
-
   private async reconcile(signal: AbortSignal) {
     const until = Date.now()
     const after = Math.max(this.checkpoint.since, this.checkpoint.syncedAt - 60_000)
@@ -271,8 +282,9 @@ export class Beeper implements PlatformAdapter {
         await this.receive(message)
       }
     })
-    this.checkpoint.syncedAt = until
-    await this.saveCheckpoint()
+    const checkpoint = { ...this.checkpoint, syncedAt: until }
+    await this.checkpoints.save(this.checkpointScope, checkpoint)
+    this.checkpoint = checkpoint
   }
 
   private async listen(signal: AbortSignal) {
@@ -309,10 +321,7 @@ export class Beeper implements PlatformAdapter {
 
   async start(signal: AbortSignal) {
     signal = AbortSignal.any([signal, this.shutdown.signal])
-    const file = Bun.file(this.checkpointPath)
-    const now = Date.now()
-    this.checkpoint = (await file.exists()) ? await file.json() : { since: now, syncedAt: now }
-    await this.saveCheckpoint()
+    this.checkpoint = await this.checkpoints.load(this.checkpointScope)
     const repeat = async (work: () => Promise<void>, delay: number) => {
       while (!signal.aborted) {
         try {

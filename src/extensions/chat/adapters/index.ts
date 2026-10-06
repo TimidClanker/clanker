@@ -5,6 +5,7 @@ import type { PlatformAccount } from 'extensions/identity'
 export type PlatformAdapter = Adapter & {
   acceptsThread?(threadId: string): boolean
   identifyAuthor(threadId: string, author: Author): PlatformAccount
+  accountLabel?(threadId: string, account: PlatformAccount): Promise<string>
   resolveDestination?(threadId: string, account: PlatformAccount, reference: string): Promise<{ threadId: string; title: string }>
   privateRecipient?(threadId: string): Promise<PlatformAccount | null>
   sandboxAudience?(threadId: string, accounts: PlatformAccount[]): Promise<PlatformAccount | null>

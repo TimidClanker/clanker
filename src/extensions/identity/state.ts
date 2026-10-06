@@ -5,9 +5,10 @@ import { defineDoc, LiveDoc, type ConversationId, type DocumentReader, type Harn
 export type PlatformAccount = { platform: string; scope: string; userId: string }
 export type Author = { identityId: string; account: PlatformAccount; displayName: string }
 
-const Directory = defineDoc<{
+export const Directory = defineDoc<{
   identities: Record<string, { name: string; linkedTo?: string }>
   accounts: Record<string, string>
+  accountNames?: Record<string, string>
 }>({ kind: 'identity.directory', version: 1, scope: 'session', initial: () => ({ identities: {}, accounts: {} }) })
 
 const ConversationIdentities = defineDoc<{
@@ -22,7 +23,7 @@ const ConversationIdentities = defineDoc<{
   initial: () => ({ participants: {}, messages: {} })
 })
 
-const accountKey = ({ platform, scope, userId }: PlatformAccount) => JSON.stringify([platform, scope, userId])
+export const accountKey = ({ platform, scope, userId }: PlatformAccount) => JSON.stringify([platform, scope, userId])
 
 const AutomatedInputs = defineDoc<Record<string, true | Author>>({
   kind: 'identity.automated-inputs',
@@ -38,7 +39,7 @@ export async function recordAutomatedInput(tx: Tx, conversationId: ConversationI
   ;(await tx.doc(AutomatedInputs, conversationId))[JSON.stringify(requestId)] = owner ?? true
 }
 
-function canonicalId(identities: Record<string, { linkedTo?: string }>, id: string): string {
+export function canonicalId(identities: Record<string, { linkedTo?: string }>, id: string): string {
   if (!Object.hasOwn(identities, id)) throw new Error('Identity not found')
   const linkedTo = identities[id]!.linkedTo
   return linkedTo ? canonicalId(identities, linkedTo) : id
@@ -52,6 +53,7 @@ export async function recordMessageAuthor(tx: Tx, conversationId: ConversationId
   if (existing) return { ...existing, account: { ...existing.account } }
   const directory = await tx.doc(Directory)
   const accountId = accountKey(account)
+  ;(directory.accountNames ??= {})[accountId] = displayName
   let identityId = directory.accounts[accountId]
   if (!identityId) {
     identityId = crypto.randomUUID()
@@ -100,7 +102,10 @@ export async function getParticipants(read: DocumentReader, conversationId: Conv
   const conversation = await read.snapshot(ConversationIdentities, conversationId, ctx)
   if (!conversation) return []
   const directory = (await read.snapshot(Directory, ctx))!
-  return Object.values(conversation.participants).map(author => ({ ...author, identityId: canonicalId(directory.identities, author.identityId) }))
+  return Object.values(conversation.participants).map(author => ({
+    ...author,
+    identityId: canonicalId(directory.identities, directory.accounts[accountKey(author.account)]!)
+  }))
 }
 
 /** Authority for user-owned actions comes from admitted input, never a model-supplied identity ID. */
@@ -135,7 +140,11 @@ export async function getRequestActors(
     if (owner && !includeAutomated) continue
     const author = owner ?? (key ? conversation?.messages[key] : undefined)
     if (!author || author === true) throw new Error('An admitted input has no verified author')
-    authors.push({ ...author, identityId: canonicalId(directory?.identities ?? {}, author.identityId) })
+    const identityId = canonicalId(directory!.identities, author.identityId)
+    if (canonicalId(directory!.identities, directory!.accounts[accountKey(author.account)]!) !== identityId) {
+      throw new Error('This account’s identity changed after that message. Please send a new request.')
+    }
+    authors.push({ ...author, identityId })
   }
   return authors
 }

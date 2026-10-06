@@ -4,8 +4,12 @@ import { defineDoc, defineTool, type ConversationId, type DocumentReader, type T
 import { findIdentity, getIdentity, getParticipants, type PlatformAccount } from 'extensions/identity/state'
 
 export type IdentityAccess = {
+  /** Presentation only; never use this label for identity matching or authorization. */
+  accountLabel(conversationId: ConversationId, account: PlatformAccount, ctx: Context): Promise<string | undefined>
   /** A freshly verified one-to-one chat recipient; null for groups or unsupported adapters. */
   privateAccount(read: DocumentReader, conversationId: ConversationId, ctx: Context): Promise<PlatformAccount | null>
+  /** Deliver an application message only after freshly verifying the exact private recipient. */
+  sendPrivate(conversationId: ConversationId, recipient: PlatformAccount, text: string, ctx: Context): Promise<void>
 }
 
 type Note = { identityId: string; visibility: 'public' | 'private'; text: string; createdAt: string; updatedAt: string }

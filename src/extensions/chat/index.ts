@@ -1,12 +1,17 @@
 import { MIMEType } from 'node:util'
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import { Chat } from 'chat'
 import { createMemoryState } from '@chat-adapter/state-memory'
 import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section, type Harness } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
-import { recordAutomatedInput, type IdentityAccess } from 'extensions/identity'
+import { recordAutomatedInput, recordMessageAuthor, type IdentityAccess } from 'extensions/identity'
+import { accountKey } from 'extensions/identity/state'
+import { createAccountLinking, isAccountLinkCommand } from 'extensions/identity/accounts'
 import { Discord } from 'extensions/chat/adapters/discord'
 import { Beeper } from 'extensions/chat/adapters/beeper'
+import { beeperConfig } from 'extensions/chat/adapters/beeper/config'
+import { BeeperCheckpoints } from 'extensions/chat/adapters/beeper/state'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 import { connectChat, prepareConversation, restoreChat } from 'extensions/chat/bridge'
 import { createDelivery } from 'extensions/chat/delivery'
@@ -16,14 +21,38 @@ import type { ScheduleChat } from 'extensions/schedules'
 import type { SandboxAccess } from 'extensions/sandbox'
 import type { MediaDelivery } from 'extensions/media-gen'
 
-export function createChatIntegration(
+export async function createChatIntegration(
   selection: ReturnType<typeof selectModel>,
   getHarness: () => Harness,
-  adapters: Record<string, PlatformAdapter> = {
-    discord: new Discord(),
-    ...(process.env.BEEPER_ENABLED === 'true' ? { beeper: new Beeper() } : {})
-  }
+  useAgent: <T>(work: (harness: Harness) => Promise<T>) => Promise<T>,
+  adapters?: Record<string, PlatformAdapter>
 ) {
+  if (!adapters) {
+    const config = await beeperConfig()
+    adapters = {
+      discord: new Discord(),
+      ...(config.accessToken && config.accountIDs.length
+        ? {
+            beeper: new Beeper(config, {
+              load: scope =>
+                useAgent(harness =>
+                  harness.commit(async tx => {
+                    const checkpoints = await tx.doc(BeeperCheckpoints)
+                    const now = Date.now()
+                    return { ...(checkpoints[scope] ??= { since: now, syncedAt: now }) }
+                  }, BACKGROUND_CONTEXT)
+                ),
+              save: (scope, checkpoint) =>
+                useAgent(harness =>
+                  harness.commit(async tx => {
+                    ;(await tx.doc(BeeperCheckpoints))[scope] = checkpoint
+                  }, BACKGROUND_CONTEXT)
+                )
+            })
+          }
+        : {})
+    }
+  }
   const chat = new Chat({
     userName: 'clanker',
     adapters,
@@ -55,6 +84,24 @@ export function createChatIntegration(
     thinkingLevel: selection.thinkingLevel,
     tools: platformFor(chat, threadId).renameThread ? null : { remove: [rename] }
   })
+  const identityAccess: IdentityAccess = {
+    async accountLabel(conversationId, account, ctx) {
+      const threadId = await threadFor(getHarness(), conversationId, ctx)
+      return platformFor(chat, threadId).accountLabel?.(threadId, account)
+    },
+    async privateAccount(read, conversationId, ctx) {
+      const source = (await listSources(read, ctx)).find(source => source.id === conversationId)
+      return source ? ((await platformFor(chat, source.threadId).privateRecipient?.(source.threadId)) ?? null) : null
+    },
+    async sendPrivate(conversationId, recipient, text, ctx) {
+      ctx.abortSignal?.throwIfAborted()
+      const threadId = await threadFor(getHarness(), conversationId, ctx)
+      const current = await platformFor(chat, threadId).privateRecipient?.(threadId)
+      if (!current || accountKey(current) !== accountKey(recipient)) throw new Error('Private recipient could not be verified')
+      await chat.thread(threadId).post(text)
+    }
+  }
+  const accountLinks = createAccountLinking(identityAccess, getHarness)
 
   return {
     media: (async (images, api, ctx) => {
@@ -114,12 +161,7 @@ export function createChatIntegration(
         return reply
       }
     } satisfies ScheduleChat,
-    identity: {
-      async privateAccount(read, conversationId, ctx) {
-        const source = (await listSources(read, ctx)).find(source => source.id === conversationId)
-        return source ? ((await platformFor(chat, source.threadId).privateRecipient?.(source.threadId)) ?? null) : null
-      }
-    } satisfies IdentityAccess,
+    identity: { ...identityAccess, accounts: accountLinks },
     extension: defineExtension({
       // Keep the stored selection name stable while moving its implementation.
       name: 'clanker',
@@ -150,9 +192,31 @@ export function createChatIntegration(
       await chat.initialize()
       await restoreChat(chat, harness, agentFor)
     },
-    async connect(useAgent: Parameters<typeof connectChat>[1], onMessage?: Parameters<typeof connectChat>[5]) {
+    async connect(onMessage?: Parameters<typeof connectChat>[5]) {
       await chat.initialize()
-      await connectChat(chat, useAgent, Reply, selection.model, agentFor, onMessage)
+      await connectChat(chat, useAgent, Reply, selection.model, agentFor, onMessage, async (thread, message) => {
+        if (!isAccountLinkCommand(message.text)) return false
+        const platform = platformFor(chat, thread.id)
+        const sender = platform.identifyAuthor(thread.id, message.author)
+        const recipient = await platform.privateRecipient?.(thread.id)
+        if (!recipient || accountKey(recipient) !== accountKey(sender)) {
+          await thread.post('Account linking is only available in a verified one-to-one chat with Clanker.')
+          return true
+        }
+        try {
+          await useAgent(async harness => {
+            await harness.commit(async tx => {
+              const conversationId = await prepareConversation(tx, thread.id, agentFor(thread.id))
+              const author = await recordMessageAuthor(tx, conversationId, message.id, sender, message.author.fullName || message.author.userName)
+              await accountLinks.handle(tx, { ...author, conversationId }, message.id, message.text)
+            }, BACKGROUND_CONTEXT)
+            harness.resume()
+          })
+        } catch {
+          await thread.post('Could not process that linking request. Please try again later, or ask me to start a new link.')
+        }
+        return true
+      })
       listening = Promise.all(Object.values(adapters).map(adapter => adapter.start?.(shutdown.signal)))
       try {
         await listening
