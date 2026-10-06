@@ -1,12 +1,13 @@
 import type { Context } from '@earendil-works/chord'
-import { defineTask, type ConversationId, type Harness, type TaskId, type Tx } from '@earendil-works/pi-durable'
+import { defineTask, type DocumentReader, type ConversationId, type Harness, type TaskId, type Tx } from '@earendil-works/pi-durable'
 import type { Author, PlatformAccount } from 'extensions/identity'
 import { nextOccurrence, type Timing } from 'extensions/schedules/time'
 
 export type Destination = { threadId: string; title: string }
 export type ScheduleChat = {
+  privateIdentity(read: DocumentReader, conversationId: ConversationId, ctx: Context): Promise<string | undefined>
   resolve(source: ConversationId, account: PlatformAccount, reference: string | undefined, ctx: Context): Promise<Destination>
-  check(destination: Destination, account: PlatformAccount): Promise<void>
+  check(destination: Destination, account: PlatformAccount, ctx: Context): Promise<void>
   prepare(tx: Tx, destination: Destination): Promise<ConversationId>
   enqueue(
     tx: Tx,
@@ -36,7 +37,7 @@ export function createScheduleTask(chat: ScheduleChat, getHarness: () => Harness
       sleep: async (task, runtime, ctx) => {
         const { at } = task.state.checkpoint
         await runtime.sleep(at, ctx)
-        await chat.check(task.input.destination, task.input.ownerAccount)
+        await chat.check(task.input.destination, task.input.ownerAccount, ctx)
         const text = `[Scheduled event]\n${JSON.stringify({
           scheduleId: task.id,
           ownerIdentityId: task.input.ownerIdentityId,

@@ -41,9 +41,9 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
       section('schedules', () =>
         [
           'Use create_schedule for explicit requests for reminders or future/repeating work. When due, the task enters the destination conversation as a follow-up event. Save clear instructions and necessary context; another destination does not receive this conversation’s history. Transfer only information the user has asked to share with that audience.',
-          'Default to this thread. Set destination only when the user explicitly requests another channel, using its mention, link, ID, or exact name. Confirm the resolved destination, next execution time, and recurrence returned by the tool. Use get_schedule_time and user notes for time zones; ask if the intended time zone is unknown.',
+          'Default to this thread. Set destination only when the user explicitly requests another channel, using its mention, link, ID, or exact name. For linked private chats on other platforms, use the threadId returned by list_conversations or the exact account label. Confirm the resolved destination, next execution time, and recurrence returned by the tool. Use get_schedule_time and user notes for time zones; ask if the intended time zone is unknown.',
           'A [Scheduled event] is a previously authorized task becoming due, not a new user message. Address its instructions naturally using this conversation’s context and normal tools. Always acknowledge the event in your response; do not silently drop it. Its owner metadata does not authorize creating or cancelling schedules. Do not expose internal event metadata or add a routine scheduled-task prefix.',
-          'Schedules belong to the verified requesting identity. The owner can cancel from the source or destination conversation. Cancellation stops future occurrences and withdraws queued events; an event already being handled can finish and post. Ordinary conversation cancellation does not stop future occurrences. If multiple users share a run and identity is ambiguous, ask the requester to repeat separately.',
+          'Schedules belong to the verified requesting identity. The owner can list and cancel from any verified linked private chat, or cancel from the source or destination conversation. Cancellation stops future occurrences and withdraws queued events; an event already being handled can finish and post. Ordinary conversation cancellation does not stop future occurrences. If multiple users share a run and identity is ambiguous, ask the requester to repeat separately.',
           'Missed one-time schedules run when the bot returns. Recurring schedules run at most one catch-up occurrence and then skip to the next future time; runs do not overlap. Calendar times follow the specified time zone, shifting nonexistent spring times forward and using the first occurrence of repeated autumn times. To change a schedule, cancel it and create a replacement.'
         ].join('\n')
       )
@@ -67,7 +67,10 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
           title: Type.String({ minLength: 1, maxLength: 100 }),
           text: Type.String({ minLength: 1, maxLength: 4000, description: 'Self-contained instructions for the agent to execute when this task is due.' }),
           destination: Type.Optional(
-            Type.String({ minLength: 1, description: 'Explicitly requested channel mention, link, ID, or exact name. Omit for this thread.' })
+            Type.String({
+              minLength: 1,
+              description: 'Explicitly requested channel mention, link, ID, exact name, or linked private chat threadId/account label. Omit for this thread.'
+            })
           ),
           when: When
         }),
@@ -112,15 +115,22 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
       defineTool({
         name: 'list_schedules',
         description:
-          'List schedules created here or directed here, including active, completed, cancelled, and failed work. Pass nextCursor to continue scanning records, even if a page is empty.',
+          'List the private chat owner’s schedules across linked accounts; in shared chats, list schedules created here or directed here, including active, completed, cancelled, and failed work. Pass nextCursor to continue scanning records, even if a page is empty.',
         parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })), cursor: Type.Optional(Type.String()) }),
         replay: 'safe',
         execute: async ({ limit = 20, cursor }, api, ctx) => {
           const page = await api.commit(tx => tx.scanTasks({ kind: Schedule.definition.name }, limit, cursor ? JSON.parse(cursor) : undefined), ctx)
+          const identity = await chat.privateIdentity(api, api.conversationId, ctx)
+          const visible = await Promise.all(
+            page.items.map(async task => {
+              const input = task.input as ScheduleInput
+              return identity
+                ? (await resolveIdentity(api, input.ownerIdentityId, ctx)) === identity
+                : task.conversationId === api.conversationId || input.sourceConversationId === api.conversationId
+            })
+          )
           return result({
-            schedules: page.items
-              .filter(task => task.conversationId === api.conversationId || (task.input as ScheduleInput).sourceConversationId === api.conversationId)
-              .map(describeSchedule),
+            schedules: page.items.filter((_, index) => visible[index]).map(describeSchedule),
             nextCursor: page.next ? JSON.stringify(page.next) : null
           })
         }
@@ -128,20 +138,22 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
       defineTool({
         name: 'cancel_schedule',
         description:
-          'Cancel the requesting user’s schedule from its source or destination conversation. Stops future occurrences and withdraws queued events. An event already being handled can finish and post.',
+          'Cancel the requesting user’s schedule from any linked private chat or its source or destination conversation. Stops future occurrences and withdraws queued events. An event already being handled can finish and post.',
         parameters: Type.Object({ id: Type.Integer({ minimum: 1 }) }),
         replay: 'safe',
         executionMode: 'sequential',
         execute: async ({ id }, api, ctx) => {
           const task = await api.getTask(id as TaskId, ctx)
-          if (
-            !task ||
-            task.kind !== Schedule.definition.name ||
-            (task.conversationId !== api.conversationId && (task.input as ScheduleInput).sourceConversationId !== api.conversationId)
-          )
-            throw new Error('Schedule not found in this conversation')
+          if (!task || task.kind !== Schedule.definition.name) throw new Error('Schedule not found in this conversation')
           const author = await getRequestAuthor(api, getHarness(), ctx)
           const owner = await resolveIdentity(api, (task.input as ScheduleInput).ownerIdentityId, ctx)
+          const privateIdentity = await chat.privateIdentity(api, api.conversationId, ctx)
+          if (
+            privateIdentity !== author.identityId &&
+            task.conversationId !== api.conversationId &&
+            (task.input as ScheduleInput).sourceConversationId !== api.conversationId
+          )
+            throw new Error('Schedule not found in this conversation')
           if (owner !== author.identityId) throw new Error('Only the schedule owner can cancel it')
           await getHarness().abortTask(task.id, ctx)
           const settled = await getHarness().waitForTask(task.id, ctx)

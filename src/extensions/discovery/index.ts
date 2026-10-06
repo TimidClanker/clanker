@@ -91,7 +91,7 @@ function selectTranscript(entries: readonly EntryRecord[], hasMore: boolean, con
 export function createDiscovery(
   sources: {
     list(read: DocumentReader, ctx: Context): Promise<{ id: ConversationId; threadId: string }[]>
-    scope(threadId: string): Promise<string | null>
+    scope(read: DocumentReader, threadId: string, ctx: Context): Promise<string | null>
     group(threadId: string): string
     url(threadId: string): string
   },
@@ -108,7 +108,7 @@ export function createDiscovery(
       if (!scopes.has(threadId)) {
         scopes.set(
           threadId,
-          sources.scope(threadId).catch(error => {
+          sources.scope(read, threadId, ctx).catch(error => {
             console.warn('[discovery] Unable to verify channel access', error)
             return null
           })
@@ -117,7 +117,7 @@ export function createDiscovery(
       return scopes.get(threadId)!
     }
     const ownScope = await access(origin.threadId)
-    const entries = all.filter(entry => sources.group(entry.threadId) === sources.group(origin.threadId))
+    const entries = ownScope?.startsWith('identity:') ? all : all.filter(entry => sources.group(entry.threadId) === sources.group(origin.threadId))
     const allowed = await Promise.all(entries.map(async entry => entry.id === current || (ownScope !== null && (await access(entry.threadId)) === ownScope)))
     return entries
       .filter((_, index) => allowed[index])

@@ -1,11 +1,12 @@
+import type { Context } from '@earendil-works/chord'
 import { MIMEType } from 'node:util'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import { Chat } from 'chat'
 import { createMemoryState } from '@chat-adapter/state-memory'
 import { Type } from '@earendil-works/pi-ai'
-import { defineExtension, defineTool, section, type Harness } from '@earendil-works/pi-durable'
+import { defineExtension, defineTool, section, type DocumentReader, type Harness } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
-import { recordAutomatedInput, recordMessageAuthor, type IdentityAccess } from 'extensions/identity'
+import { findIdentity, recordAutomatedInput, recordMessageAuthor, type IdentityAccess } from 'extensions/identity'
 import { accountKey } from 'extensions/identity/state'
 import { createAccountLinking, isAccountLinkCommand } from 'extensions/identity/accounts'
 import { Discord } from 'extensions/chat/adapters/discord'
@@ -132,16 +133,40 @@ export async function createChatIntegration(
       }
     } satisfies SandboxAccess,
     schedules: {
+      async privateIdentity(read, conversationId, ctx) {
+        const account = await identityAccess.privateAccount(read, conversationId, ctx)
+        return account ? await findIdentity(read, account, ctx) : undefined
+      },
       async resolve(source, account, reference, ctx) {
         const threadId = await threadFor(getHarness(), source, ctx)
+        if (reference) {
+          const read = getHarness()
+          const recipient = await identityAccess.privateAccount(read, source, ctx)
+          const owner = await findIdentity(read, account, ctx)
+          if (recipient && owner && (await findIdentity(read, recipient, ctx)) === owner) {
+            const matches = []
+            for (const candidate of await listSources(read, ctx)) {
+              const target = platformFor(chat, candidate.threadId)
+              const peer = await target.privateRecipient?.(candidate.threadId).catch(() => null)
+              if (!peer || (await findIdentity(read, peer, ctx)) !== owner) continue
+              const label = await target.accountLabel?.(candidate.threadId, peer)
+              if (reference === candidate.threadId || reference === label) matches.push({ threadId: candidate.threadId, title: label ?? candidate.threadId })
+            }
+            if (matches.length > 1) throw new Error('Ambiguous destination; use the exact thread ID from list_conversations')
+            if (matches.length === 1) return matches[0]!
+          }
+        }
         const platform = platformFor(chat, threadId)
         if (!platform.resolveDestination) throw new Error('This platform does not support directing tasks to other channels')
         return platform.resolveDestination(threadId, account, reference ?? threadId)
       },
-      async check(destination, account) {
+      async check(destination, account, ctx) {
         const platform = platformFor(chat, destination.threadId)
         if (!platform.resolveDestination) throw new Error('This platform cannot verify scheduled task destinations')
-        await platform.resolveDestination(destination.threadId, account, destination.threadId)
+        const peer = await platform.privateRecipient?.(destination.threadId)
+        const owner = await findIdentity(getHarness(), account, ctx)
+        const linked = peer && owner && (await findIdentity(getHarness(), peer, ctx)) === owner
+        await platform.resolveDestination(destination.threadId, linked ? peer : account, destination.threadId)
         await chat.thread(destination.threadId).subscribe()
       },
       prepare: (tx, destination) => prepareConversation(tx, destination.threadId, agentFor(destination.threadId)),
@@ -176,8 +201,13 @@ export async function createChatIntegration(
     }),
     discovery: {
       list: listSources,
-      async scope(threadId: string) {
+      async scope(read: DocumentReader, threadId: string, ctx: Context) {
         const platform = platformFor(chat, threadId)
+        const recipient = await platform.privateRecipient?.(threadId)
+        if (recipient) {
+          const identity = await findIdentity(read, recipient, ctx)
+          return identity ? `identity:${identity}` : null
+        }
         const scope = await platform.discoveryScope?.(threadId)
         return scope == null ? null : JSON.stringify([platform.name, scope])
       },
