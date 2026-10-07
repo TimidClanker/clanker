@@ -10,7 +10,8 @@ import {
   type ToolRegistration
 } from '@earendil-works/pi-durable'
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from '@earendil-works/pi-durable/tools'
-import { findIdentity, getIdentity, getRequestActors, type PlatformAccount } from 'extensions/identity'
+import { Delegation, sourceConversation, findIdentity, getIdentity, getRequestActors, type PlatformAccount } from 'extensions/identity'
+import { active, Jobs, WorkspaceJobs } from 'extensions/jobs/state'
 import { createWorkspaces } from 'extensions/sandbox/workspaces'
 import { ownerKey, Workspaces, type SandboxOwner } from 'extensions/sandbox/state'
 import type { SandboxProvider } from 'extensions/sandbox/providers'
@@ -42,7 +43,7 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
       if (!grant || 'error' in grant) throw new Error(grant && 'error' in grant ? grant.error : 'No verified sandbox owner for this model round')
       if (!grant.accounts.length) throw new Error('Sandbox access requires a verified requester')
       const recipient = await access.audience(api, api.conversationId, grant.accounts, ctx)
-      let owner: SandboxOwner = { kind: 'conversation', id: String(api.conversationId) }
+      let owner: SandboxOwner = { kind: 'conversation', id: String(await sourceConversation(api, api.conversationId, ctx)) }
       if (recipient) {
         const id = await findIdentity(api, recipient, ctx)
         if (!id || (await Promise.all(grant.accounts.map(account => findIdentity(api, account, ctx)))).some(author => author !== id)) {
@@ -51,6 +52,7 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
         owner = { kind: 'identity', ...(await getIdentity(api, id, ctx)) }
       }
       const key = ownerKey(owner)
+      const delegation = await api.snapshot(Delegation, api.conversationId, ctx)
       const workspace = await api.commit(async tx => {
         const all = await tx.doc(Workspaces)
         const previous = [
@@ -64,6 +66,16 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
         if (!all[key] && previous.length > 1) throw new Error('Linked identities have multiple workspaces; choose a workspace before continuing')
         const saved = (all[key] ??= previous[0] ?? { id: `clanker-${crypto.randomUUID()}`, provider: provider.name })
         if (saved.provider !== provider.name) throw new Error(`This workspace uses the ${saved.provider} provider`)
+        const leases = await tx.doc(WorkspaceJobs)
+        const jobs = (await tx.doc(Jobs)).jobs
+        const holder = jobs[leases[saved.id]!]
+        if (holder && active(holder) && holder.id !== delegation?.jobId) {
+          throw new Error(`Sandbox is reserved by background task “${holder.title}”. Steer or cancel it before using this workspace.`)
+        }
+        if (delegation?.jobId) {
+          if (jobs[delegation.jobId]?.status !== 'running') throw new Error('Background task is not running')
+          leases[saved.id] = delegation.jobId
+        } else delete leases[saved.id]
         return { ...saved }
       }, ctx)
       return workspaces.use({ ...workspace, scope: owner.kind }, ctx, env => tool.execute(args, { ...api, env }, ctx))
