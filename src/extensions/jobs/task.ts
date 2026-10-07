@@ -1,11 +1,14 @@
 import type { Context } from '@earendil-works/chord'
 import type { AssistantMessage } from '@earendil-works/pi-ai'
-import { AssistantEntry, defineTask, type EntryId, type Harness, type TaskId, type Tx } from '@earendil-works/pi-durable'
+import { AssistantEntry, defineTask, type EntryId, type Harness, type TaskId, type Tx, type ToolExecutionApi } from '@earendil-works/pi-durable'
 import { findIdentity, recordAutomatedInput, resolveIdentity } from 'extensions/identity'
 import type { ScheduleChat } from 'extensions/schedules'
 import { JobInputs, Jobs, type Job } from 'extensions/jobs/state'
 
-export type JobChat = Pick<ScheduleChat, 'privateIdentity' | 'check' | 'enqueue'> & { checkScope?(job: Job, ctx: Context, tx?: Tx): Promise<void> }
+export type JobChat = Pick<ScheduleChat, 'privateIdentity' | 'check' | 'enqueue'> & {
+  checkScope?(job: Job, ctx: Context, tx?: Tx): Promise<void>
+  supplyJobs?(jobs: Job[], api: ToolExecutionApi, ctx: Context): Promise<void>
+}
 
 export async function checkJob(job: Job, harness: Harness, chat: Pick<JobChat, 'check' | 'checkScope'>, ctx: Context) {
   if ((await findIdentity(harness, job.owner.account, ctx)) !== (await resolveIdentity(harness, job.owner.identityId, ctx))) {

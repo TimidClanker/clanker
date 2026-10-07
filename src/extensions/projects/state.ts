@@ -1,4 +1,6 @@
-import { defineDoc, type ConversationId } from '@earendil-works/pi-durable'
+import { defineDoc, type ConversationId, type TaskId } from '@earendil-works/pi-durable'
+
+import type { Author } from 'extensions/identity'
 
 export type ProjectScope = { projectId: string; workItemIds?: string[] }[]
 export type Role = 'admin' | 'editor' | 'reader'
@@ -40,3 +42,17 @@ export const ProjectContext = defineDoc<{ links: ProjectScope }>({
 export const ProjectCall = defineDoc<{
   value?: { projectId?: string; recordId?: string; revision?: number; changed?: boolean; deleted?: string; associated?: ProjectScope }
 }>({ kind: 'projects.call', version: 1, scope: 'task', initial: () => ({}) })
+
+/** Host-recorded authority for content actually supplied in a foreground run. */
+export type ProjectDisclosure = {
+  author: Author
+  conversationId: ConversationId
+  projectId: string
+  jobId?: TaskId
+  minimum?: Role
+  private?: boolean
+}
+export const ProjectDisclosures = defineDoc<{
+  runs: Record<string, ProjectDisclosure[]>
+  generations: Record<string, ProjectDisclosure[]>
+}>({ kind: 'projects.disclosures', version: 1, scope: 'conversation', history: 'latest', fork: 'initial', initial: () => ({ runs: {}, generations: {} }) })

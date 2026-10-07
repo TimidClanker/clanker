@@ -53,7 +53,7 @@ async function main() {
     )
     cleanup.defer(() => chat.close())
     const projects = createProjects(chat.schedules, () => runtime.get())
-    chat.setProjectAccess(projects.checkScope)
+    chat.setProjectAccess(projects)
     const discovery = createDiscovery(chat.discovery, queryModel)
     const sandboxProvider = new Vercel()
     const sandbox = (await sandboxProvider.isConfigured()) ? createSandbox(chat.sandbox, () => runtime.get(), sandboxProvider) : undefined

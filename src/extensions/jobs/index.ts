@@ -19,7 +19,7 @@ import { getBackgroundInputJobs } from 'extensions/identity/state'
 import { projectScopeSchema } from 'extensions/projects'
 import { canonicalId, Directory } from 'extensions/identity/state'
 import { threadFor } from 'extensions/chat/state'
-import { active, describeJob, JobCall, JobInputs, Jobs, JobAnswerScopes } from 'extensions/jobs/state'
+import { active, describeJob, JobCall, JobInputs, Jobs, JobAnswerScopes, type Job } from 'extensions/jobs/state'
 import { checkJob, createJobTasks, notifyJob, type JobChat } from 'extensions/jobs/task'
 
 // Workers cannot send directly to users, manage accounts/schedules/notes, or spawn other background workers.
@@ -62,9 +62,12 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
     const author = await requester(api, ctx)
     const privateIdentity = await chat.privateIdentity(api, api.conversationId, ctx)
     const jobs = Object.values((await api.snapshot(Jobs, ctx))?.jobs ?? {})
+    const authorized = await getRequestActors(api, getHarness(), api.conversationId, ctx, 'schedules')
+    const reports = authorized.length ? undefined : await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
     const allowed = await Promise.all(
       jobs.map(
         async job =>
+          (!reports || (reports.length === 1 && reports[0] === job.id)) &&
           (await resolveIdentity(api, job.owner.identityId, ctx)) === author.identityId &&
           (privateIdentity === author.identityId || job.sourceConversationId === api.conversationId)
       )
@@ -110,6 +113,11 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
       await getHarness().abortTask(api.taskId, ctx)
       throw error
     }
+  }
+
+  const supplyJobs = async (jobs: Job[], api: ToolExecutionApi, ctx: Context) => {
+    if (jobs.some(job => job.projectScope?.length) && !chat.supplyJobs) throw new Error('Project disclosure verification is unavailable')
+    await chat.supplyJobs?.(jobs, api, ctx)
   }
 
   const report = defineTool({
@@ -296,7 +304,11 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
         description: 'List the verified owner’s background tasks across linked private chats; shared chats only expose that owner’s tasks originating here.',
         parameters: Type.Object({}),
         replay: 'safe',
-        execute: async (_args, api, ctx) => result({ tasks: (await visible(api, ctx)).toReversed().slice(0, 50).map(describeJob) })
+        execute: async (_args, api, ctx) => {
+          const jobs = (await visible(api, ctx)).toReversed().slice(0, 50)
+          await supplyJobs(jobs, api, ctx)
+          return result({ tasks: jobs.map(describeJob) })
+        }
       }),
       defineTool({
         name: 'get_background_task',
@@ -305,6 +317,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
         replay: 'safe',
         execute: async ({ id }, api, ctx) => {
           const job = await owned(api, id, ctx)
+          await supplyJobs([job], api, ctx)
           return result({ ...describeJob(job), instructions: job.instructions })
         }
       }),
@@ -336,7 +349,9 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
             receipt.id = current.id
             receipt.revision = current.revision
           }, ctx)
-          return result(describeJob((await api.snapshot(Jobs, ctx))!.jobs[id]!))
+          const current = (await api.snapshot(Jobs, ctx))!.jobs[id]!
+          await supplyJobs([current], api, ctx)
+          return result(describeJob(current))
         }
       }),
       defineTool({
@@ -365,6 +380,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
               () => true,
               () => false
             )) ?? !job.projectScope?.length
+          if (permitted) await supplyJobs([job], api, ctx)
           return result(permitted ? describeJob(job) : { id: job.id, status: job.status })
         }
       }),
