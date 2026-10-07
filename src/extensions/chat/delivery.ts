@@ -7,7 +7,7 @@ import type { createPost } from 'extensions/chat/post'
 
 export function createDelivery(chat: Chat, getHarness: () => Harness, Post: ReturnType<typeof createPost>) {
   return defineTask<
-    { threadId: string; messageId: string; text: string; images?: ImageContent[]; previous: TaskId | null; schedule?: TaskId },
+    { threadId: string; messageId: string; text: string; images?: ImageContent[]; previous: TaskId | null; schedule?: TaskId; internal?: boolean },
     | { phase: 'queue' }
     | { phase: 'answer'; submission: SubmissionId }
     | { phase: 'withdraw'; submissions: SubmissionId[] }
@@ -40,7 +40,7 @@ export function createDelivery(chat: Chat, getHarness: () => Harness, Post: Retu
             type: 'input',
             content: task.input.images?.length ? [{ type: 'text', text: task.input.text }, ...task.input.images] : task.input.text,
             requestId: task.input.messageId,
-            whenBusy: schedule === undefined ? 'steer' : 'followUp'
+            whenBusy: schedule === undefined && !task.input.internal ? 'steer' : 'followUp'
           },
           ctx
         )
@@ -58,10 +58,15 @@ export function createDelivery(chat: Chat, getHarness: () => Harness, Post: Retu
         )
       },
       answer: async (task, runtime, ctx) => {
-        using typing = showTyping(chat.thread(task.input.threadId))
+        using typing = task.input.internal ? undefined : showTyping(chat.thread(task.input.threadId))
         const submission = (await getHarness().submission(task.state.checkpoint.submission, ctx))!
         const settled = await submission.wait(ctx)
         if (settled.status === 'unanswered') {
+          if (task.input.internal) {
+            if (settled.reason !== 'aborted') console.error('[jobs] Internal update unanswered', settled)
+            await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx)
+            return
+          }
           if (settled.reason !== 'aborted') console.error('[clanker] Unanswered message', settled)
           if (task.input.schedule !== undefined) {
             if (settled.reason !== 'aborted') {

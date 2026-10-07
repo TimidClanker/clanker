@@ -7,6 +7,7 @@ import { OpenAICodex } from 'extensions/media-gen/providers/openai-codex'
 import { OpenRouter } from 'extensions/media-gen/providers/openrouter'
 import { createIdentity } from 'extensions/identity'
 import { createSchedules } from 'extensions/schedules'
+import { createJobs } from 'extensions/jobs'
 import { createSandbox } from 'extensions/sandbox'
 import { Vercel } from 'extensions/sandbox/providers/vercel'
 import { models } from 'auth/store'
@@ -60,6 +61,7 @@ async function main() {
         createIdentity(chat.identity),
         chat.extension,
         createSchedules(chat.schedules, () => runtime.get()),
+        createJobs(chat.schedules, () => runtime.get()),
         discovery.extension,
         createWeb(models, selectModel(process.env.SEARCH_MODEL ?? modelSelection)),
         createMediaGen([new OpenAICodex(models), new OpenRouter(models)], chat.media),

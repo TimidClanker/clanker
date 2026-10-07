@@ -9,6 +9,7 @@ export function createWorkspaces(provider: SandboxProvider, idleMs: number) {
     string,
     {
       tail: Promise<unknown>
+      busy?: boolean
       session?: Awaited<ReturnType<SandboxProvider['open']>>
       timer?: ReturnType<typeof setTimeout>
     }
@@ -20,6 +21,10 @@ export function createWorkspaces(provider: SandboxProvider, idleMs: number) {
       if (closing) throw new Error('Sandbox extension is shutting down')
       let slot = slots.get(workspace.id)
       if (!slot) slots.set(workspace.id, (slot = { tail: Promise.resolve() }))
+      // A background command must not make a foreground tool wait behind it.
+      if (slot.busy)
+        throw new Error('Sandbox is busy with another operation. Continue without it or coordinate with the other background task; retry after it finishes.')
+      slot.busy = true
       clearTimeout(slot.timer)
       const current = slot
       const job = current.tail
@@ -39,14 +44,19 @@ export function createWorkspaces(provider: SandboxProvider, idleMs: number) {
       try {
         return await job
       } finally {
+        current.busy = false
         if (!closing && current.tail === job) {
           current.timer = setTimeout(() => {
+            current.busy = true
             current.tail = current.tail
               .catch(() => {})
               .then(async () => {
                 await current.session?.stop(BACKGROUND_CONTEXT)
                 current.session = undefined
               })
+            current.tail = current.tail.finally(() => {
+              current.busy = false
+            })
             void current.tail.catch(error => console.error('[sandbox] Idle stop failed', error))
           }, idleMs)
           current.timer.unref()

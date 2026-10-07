@@ -6,7 +6,7 @@ import { createMemoryState } from '@chat-adapter/state-memory'
 import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section, type DocumentReader, type Harness } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
-import { findIdentity, recordAutomatedInput, recordMessageAuthor, type IdentityAccess } from 'extensions/identity'
+import { findIdentity, sourceConversation, recordAutomatedInput, recordMessageAuthor, type IdentityAccess } from 'extensions/identity'
 import { accountKey } from 'extensions/identity/state'
 import { createAccountLinking, isAccountLinkCommand } from 'extensions/identity/accounts'
 import { Discord } from 'extensions/chat/adapters/discord'
@@ -91,6 +91,7 @@ export async function createChatIntegration(
       return platformFor(chat, threadId).accountLabel?.(threadId, account)
     },
     async privateAccount(read, conversationId, ctx) {
+      conversationId = await sourceConversation(read, conversationId, ctx)
       const source = (await listSources(read, ctx)).find(source => source.id === conversationId)
       return source ? ((await platformFor(chat, source.threadId).privateRecipient?.(source.threadId)) ?? null) : null
     },
@@ -170,12 +171,12 @@ export async function createChatIntegration(
         await chat.thread(destination.threadId).subscribe()
       },
       prepare: (tx, destination) => prepareConversation(tx, destination.threadId, agentFor(destination.threadId)),
-      async enqueue(tx, conversationId, { schedule, requestId, text, owner, threadId }) {
-        await recordAutomatedInput(tx, conversationId, requestId, owner)
+      async enqueue(tx, conversationId, { schedule, requestId, text, owner, threadId, internal }) {
+        await recordAutomatedInput(tx, conversationId, requestId, owner, schedule === undefined ? 'background' : 'schedule')
         const messages = await tx.doc(Messages, conversationId)
         const reply = await tx.createTask(
           Reply,
-          { threadId, messageId: requestId, text, previous: messages.lastTask, schedule },
+          { threadId, messageId: requestId, text, previous: messages.lastTask, schedule, internal },
           {
             conversationId,
             ownership: { kind: 'conversation' },

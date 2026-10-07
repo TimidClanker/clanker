@@ -1,5 +1,14 @@
 import type { Context } from '@earendil-works/chord'
-import { defineDoc, LiveDoc, type ConversationId, type DocumentReader, type Harness, type ToolExecutionApi, type Tx } from '@earendil-works/pi-durable'
+import {
+  defineDoc,
+  LiveDoc,
+  type ConversationId,
+  type TaskId,
+  type DocumentReader,
+  type Harness,
+  type ToolExecutionApi,
+  type Tx
+} from '@earendil-works/pi-durable'
 
 // Scope is the platform's account namespace, e.g. a Slack workspace or "global" for Discord.
 export type PlatformAccount = { platform: string; scope: string; userId: string }
@@ -23,9 +32,23 @@ const ConversationIdentities = defineDoc<{
   initial: () => ({ participants: {}, messages: {} })
 })
 
+/** Host-only origin of a delegated conversation. Never accept this from model arguments. */
+export const Delegation = defineDoc<{ sourceConversationId?: ConversationId; jobId?: TaskId }>({
+  kind: 'identity.delegation',
+  version: 1,
+  scope: 'conversation',
+  history: 'latest',
+  fork: 'initial',
+  initial: () => ({})
+})
+
+export async function sourceConversation(read: DocumentReader, conversationId: ConversationId, ctx: Context) {
+  return (await read.snapshot(Delegation, conversationId, ctx))?.sourceConversationId ?? conversationId
+}
+
 export const accountKey = ({ platform, scope, userId }: PlatformAccount) => JSON.stringify([platform, scope, userId])
 
-const AutomatedInputs = defineDoc<Record<string, true | Author>>({
+const AutomatedInputs = defineDoc<Record<string, true | (Author & { kind?: 'schedule' | 'background' })>>({
   kind: 'identity.automated-inputs',
   version: 1,
   scope: 'conversation',
@@ -35,8 +58,8 @@ const AutomatedInputs = defineDoc<Record<string, true | Author>>({
 })
 
 /** Host-only provenance: automated input is not a new user authorization, even when it names an owner. */
-export async function recordAutomatedInput(tx: Tx, conversationId: ConversationId, requestId: string, owner?: Author) {
-  ;(await tx.doc(AutomatedInputs, conversationId))[JSON.stringify(requestId)] = owner ?? true
+export async function recordAutomatedInput(tx: Tx, conversationId: ConversationId, requestId: string, owner?: Author, kind?: 'schedule' | 'background') {
+  ;(await tx.doc(AutomatedInputs, conversationId))[JSON.stringify(requestId)] = owner ? { ...owner, ...(kind ? { kind } : {}) } : true
 }
 
 export function canonicalId(identities: Record<string, { linkedTo?: string }>, id: string): string {
@@ -99,7 +122,7 @@ export async function findIdentity(read: DocumentReader, account: PlatformAccoun
 
 /** Observed senders only. This is neither the channel's member list nor an access-control decision. */
 export async function getParticipants(read: DocumentReader, conversationId: ConversationId, ctx: Context): Promise<Author[]> {
-  const conversation = await read.snapshot(ConversationIdentities, conversationId, ctx)
+  const conversation = await read.snapshot(ConversationIdentities, await sourceConversation(read, conversationId, ctx), ctx)
   if (!conversation) return []
   const directory = (await read.snapshot(Directory, ctx))!
   return Object.values(conversation.participants).map(author => ({
@@ -109,8 +132,8 @@ export async function getParticipants(read: DocumentReader, conversationId: Conv
 }
 
 /** Authority for user-owned actions comes from admitted input, never a model-supplied identity ID. */
-export async function getRequestAuthor(api: ToolExecutionApi, harness: Pick<Harness, 'submission'>, ctx: Context): Promise<Author> {
-  const authors = await getRequestActors(api, harness, api.conversationId, ctx)
+export async function getRequestAuthor(api: ToolExecutionApi, harness: Pick<Harness, 'submission'>, ctx: Context, allowSchedules = false): Promise<Author> {
+  const authors = await getRequestActors(api, harness, api.conversationId, ctx, allowSchedules ? 'schedules' : false)
   if (!authors.length || new Set(authors.map(author => author.identityId)).size !== 1) {
     throw new Error(
       'This action needs a request from one verified user. If several people contributed to this run, ask the owner to repeat the request separately.'
@@ -119,13 +142,13 @@ export async function getRequestAuthor(api: ToolExecutionApi, harness: Pick<Harn
   return authors.at(-1)!
 }
 
-/** Host provenance for admitted inputs. Scheduled owners are opt-in; they cannot authorize new user-owned actions. */
+/** Host provenance for admitted inputs. Automated owners are opt-in; only explicitly tagged schedules can delegate existing authorized work. */
 export async function getRequestActors(
   read: DocumentReader,
   harness: Pick<Harness, 'submission'>,
   conversationId: ConversationId,
   ctx: Context,
-  includeAutomated = false
+  includeAutomated: boolean | 'schedules' = false
 ): Promise<Author[]> {
   const inputs = (await read.snapshot(LiveDoc, conversationId, ctx))?.run?.inputs ?? []
   const automated = await read.snapshot(AutomatedInputs, conversationId, ctx)
@@ -137,14 +160,14 @@ export async function getRequestActors(
     const record = await submission?.status(ctx)
     const key = JSON.stringify(record?.requestId)
     const owner = key ? automated?.[key] : undefined
-    if (owner && !includeAutomated) continue
+    if (owner && (!includeAutomated || (includeAutomated === 'schedules' && (owner === true || owner.kind !== 'schedule')))) continue
     const author = owner ?? (key ? conversation?.messages[key] : undefined)
     if (!author || author === true) throw new Error('An admitted input has no verified author')
     const identityId = canonicalId(directory!.identities, author.identityId)
     if (canonicalId(directory!.identities, directory!.accounts[accountKey(author.account)]!) !== identityId) {
       throw new Error('This account’s identity changed after that message. Please send a new request.')
     }
-    authors.push({ ...author, identityId })
+    authors.push({ identityId, account: author.account, displayName: author.displayName })
   }
   return authors
 }

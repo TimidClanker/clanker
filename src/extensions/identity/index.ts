@@ -5,6 +5,8 @@ import { createNoteTools, type IdentityAccess } from 'extensions/identity/notes'
 import type { createAccountLinking } from 'extensions/identity/accounts'
 
 export {
+  Delegation,
+  sourceConversation,
   findIdentity,
   getIdentity,
   resolveIdentity,
