@@ -15,17 +15,17 @@
   },
   "dependencies": {
     "@beeper/desktop-api": "6.0.0",
-    "@chat-adapter/discord": "4.40.0",
-    "@chat-adapter/state-memory": "4.40.0",
-    "@earendil-works/chord": "1.0.0",
-    "@earendil-works/pi-ai": "1.0.0",
-    "@earendil-works/pi-durable": "1.0.0",
+    "@chat-adapter/discord": "4.41.1",
+    "@chat-adapter/state-memory": "4.41.1",
+    "@earendil-works/chord": "1.0.1",
+    "@earendil-works/pi-ai": "1.0.1",
+    "@earendil-works/pi-durable": "1.0.1",
     "@vercel/sandbox": "3.5.1",
-    "chat": "4.40.0"
+    "chat": "4.41.1"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "prettier": "^3.9.6"
+    "prettier": "^3.9.9"
   },
   "peerDependencies": {
     "typescript": "^7"
