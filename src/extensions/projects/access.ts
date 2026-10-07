@@ -36,7 +36,7 @@ export function scopeAllows(scope: ProjectScope, projectId: string, workItemId?:
 export function createProjectAccess(chat: ProjectChat, getHarness: () => Harness) {
   async function audience(read: DocumentReader, actor: ProjectActor, ctx: Context) {
     const threadId = await threadFor(read, actor.conversationId, ctx)
-    await chat.check({ threadId, title: 'Project access' }, actor.author.account, ctx)
+    await chat.check({ threadId, title: 'Project access' }, actor.author.account, ctx, read)
     return chat.privateIdentity(read, actor.conversationId, ctx)
   }
   function requireAccess(

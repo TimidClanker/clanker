@@ -7,7 +7,8 @@ export type Destination = { threadId: string; title: string }
 export type ScheduleChat = {
   privateIdentity(read: DocumentReader, conversationId: ConversationId, ctx: Context): Promise<string | undefined>
   resolve(source: ConversationId, account: PlatformAccount, reference: string | undefined, ctx: Context): Promise<Destination>
-  check(destination: Destination, account: PlatformAccount, ctx: Context): Promise<void>
+  // Use the transaction reader when checking on a durable commit line.
+  check(destination: Destination, account: PlatformAccount, ctx: Context, read?: DocumentReader): Promise<void>
   prepare(tx: Tx, destination: Destination): Promise<ConversationId>
   enqueue(
     tx: Tx,

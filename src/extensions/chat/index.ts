@@ -68,12 +68,12 @@ export async function createChatIntegration(
   const shutdown = new AbortController()
   let listening: Promise<unknown> = Promise.resolve()
   let closing: Promise<void> | undefined
-  const checkDestination: ScheduleChat['check'] = async (destination, account, ctx) => {
+  const checkDestination: ScheduleChat['check'] = async (destination, account, ctx, read = getHarness()) => {
     const platform = platformFor(chat, destination.threadId)
     if (!platform.resolveDestination) throw new Error('This platform cannot verify scheduled task destinations')
     const peer = await platform.privateRecipient?.(destination.threadId)
-    const owner = await findIdentity(getHarness(), account, ctx)
-    const linked = peer && owner && (await findIdentity(getHarness(), peer, ctx)) === owner
+    const owner = await findIdentity(read, account, ctx)
+    const linked = peer && owner && (await findIdentity(read, peer, ctx)) === owner
     await platform.resolveDestination(destination.threadId, linked ? peer : account, destination.threadId)
     await chat.thread(destination.threadId).subscribe()
   }
