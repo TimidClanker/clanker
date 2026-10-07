@@ -1,5 +1,6 @@
 import { defineDoc, type ConversationId, type EntryId, type TaskId } from '@earendil-works/pi-durable'
 import type { Author } from 'extensions/identity'
+import type { ProjectScope } from 'extensions/projects/state'
 
 export type Job = {
   id: TaskId
@@ -13,6 +14,7 @@ export type Job = {
   revision: number
   createdAt: string
   updatedAt: string
+  projectScope?: ProjectScope
   progress?: string
   question?: string
   result?: string
@@ -48,4 +50,14 @@ export const WorkspaceJobs = defineDoc<Record<string, TaskId>>({
   version: 1,
   scope: 'session',
   initial: () => ({})
+})
+
+/** Report scopes contributing to an answer, including a coalesced ordinary user reply. */
+export const JobAnswerScopes = defineDoc<{ generations: Record<string, TaskId[]> }>({
+  kind: 'jobs.answer-scopes',
+  version: 1,
+  scope: 'conversation',
+  history: 'latest',
+  fork: 'initial',
+  initial: () => ({ generations: {} })
 })

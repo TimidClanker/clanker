@@ -2,6 +2,7 @@ import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai'
 import { AssistantEntry, defineTask, InboxDoc, LiveDoc, type Harness, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord'
 import type { Chat } from 'chat'
+import { JobAnswerScopes } from 'extensions/jobs/state'
 import { Messages } from 'extensions/chat/state'
 import { showTyping } from 'extensions/chat/typing'
 import type { createPost } from 'extensions/chat/post'
@@ -26,7 +27,7 @@ export function createDelivery(
     | { phase: 'queue' }
     | { phase: 'answer'; submission: SubmissionId }
     | { phase: 'withdraw'; submissions: SubmissionId[] }
-    | { phase: 'send'; text: string; answer?: EntryId; error?: string }
+    | { phase: 'send'; text: string; answer?: EntryId; error?: string; jobs?: TaskId[] }
     | { phase: 'delivered'; post: TaskId<null>; answer?: EntryId; error?: string },
     null
   >({
@@ -120,6 +121,7 @@ export function createDelivery(
         }
         await runtime.commit(async tx => {
           let text = 'Sorry, I could not generate a response. Please try again.'
+          let jobs: TaskId[] | undefined
           if (settled.status === 'done' && settled.type === 'input') {
             const messages = await tx.doc(Messages, runtime.conversationId)
             // Several steers can share an answer. Deliver each distinct answer once, in order.
@@ -127,6 +129,7 @@ export function createDelivery(
               return { status: 'terminal', outcome: { status: 'completed', result: null } }
             }
             const entry = await tx.entry(AssistantEntry, settled.answer)
+            if (entry?.byTaskId !== undefined) jobs = (await tx.doc(JobAnswerScopes, runtime.conversationId)).generations[entry.byTaskId]
             const answer = entry!.model![0] as AssistantMessage
             text = answer.content
               .flatMap(part => (part.type === 'text' ? [part.text] : []))
@@ -140,7 +143,12 @@ export function createDelivery(
           }
           return {
             status: 'running',
-            checkpoint: { phase: 'send', text, ...(settled.status === 'done' && settled.type === 'input' ? { answer: settled.answer } : {}) }
+            checkpoint: {
+              phase: 'send',
+              text,
+              ...(jobs?.length ? { jobs } : {}),
+              ...(settled.status === 'done' && settled.type === 'input' ? { answer: settled.answer } : {})
+            }
           }
         }, ctx)
       },
@@ -161,9 +169,13 @@ export function createDelivery(
         )
       },
       send: async (task, runtime, ctx) => {
-        const { text, answer, error } = task.state.checkpoint
+        const { text, answer, error, jobs } = task.state.checkpoint
         await runtime.commit(async tx => {
-          const post = await tx.createTask(Post, { threadId: task.input.threadId, text, job: task.input.job }, { ownership: { kind: 'task', taskId: task.id } })
+          const post = await tx.createTask(
+            Post,
+            { threadId: task.input.threadId, text, job: task.input.job, jobs },
+            { ownership: { kind: 'task', taskId: task.id } }
+          )
           return {
             status: 'waiting',
             checkpoint: { phase: 'delivered', post, ...(answer === undefined ? {} : { answer }), ...(error ? { error } : {}) },
