@@ -12,7 +12,7 @@ export type ScheduleChat = {
   enqueue(
     tx: Tx,
     conversationId: ConversationId,
-    event: { schedule?: TaskId; requestId: string; text: string; owner: Author; threadId: string; internal?: boolean }
+    event: { schedule?: TaskId; requestId: string; text: string; owner: Author; threadId: string; internal?: boolean; job?: TaskId }
   ): Promise<TaskId<null>>
 }
 export type ScheduleInput = {

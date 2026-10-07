@@ -7,7 +7,7 @@ import { JobInputs, Jobs, type Job } from 'extensions/jobs/state'
 
 export type JobChat = Pick<ScheduleChat, 'privateIdentity' | 'check' | 'enqueue'>
 
-export async function checkJob(job: Job, harness: Harness, chat: JobChat, ctx: Context) {
+export async function checkJob(job: Job, harness: Harness, chat: Pick<JobChat, 'check'>, ctx: Context) {
   if ((await findIdentity(harness, job.owner.account, ctx)) !== (await resolveIdentity(harness, job.owner.identityId, ctx))) {
     throw new Error('The account that delegated this task no longer belongs to its owner')
   }
@@ -20,6 +20,7 @@ export async function notifyJob(tx: Tx, chat: JobChat, job: Job, requestId: stri
     threadId: job.threadId,
     owner: job.owner,
     internal: true,
+    job: job.id,
     text: `[Background task update]\n${JSON.stringify({ id: job.id, title: job.title, revision: job.revision, kind, text })}`
   })
 }

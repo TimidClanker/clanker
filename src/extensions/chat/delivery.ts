@@ -1,13 +1,28 @@
 import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai'
 import { AssistantEntry, defineTask, InboxDoc, LiveDoc, type Harness, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
+import type { Context } from '@earendil-works/chord'
 import type { Chat } from 'chat'
 import { Messages } from 'extensions/chat/state'
 import { showTyping } from 'extensions/chat/typing'
 import type { createPost } from 'extensions/chat/post'
 
-export function createDelivery(chat: Chat, getHarness: () => Harness, Post: ReturnType<typeof createPost>) {
+export function createDelivery(
+  chat: Chat,
+  getHarness: () => Harness,
+  Post: ReturnType<typeof createPost>,
+  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>
+) {
   return defineTask<
-    { threadId: string; messageId: string; text: string; images?: ImageContent[]; previous: TaskId | null; schedule?: TaskId; internal?: boolean },
+    {
+      threadId: string
+      messageId: string
+      text: string
+      images?: ImageContent[]
+      previous: TaskId | null
+      schedule?: TaskId
+      internal?: boolean
+      job?: TaskId
+    },
     | { phase: 'queue' }
     | { phase: 'answer'; submission: SubmissionId }
     | { phase: 'withdraw'; submissions: SubmissionId[] }
@@ -30,6 +45,16 @@ export function createDelivery(chat: Chat, getHarness: () => Harness, Post: Retu
           }, ctx)
           if (cancelled) {
             await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), ctx)
+            return
+          }
+        }
+        if (task.input.job !== undefined && authorize) {
+          try {
+            await authorize(task.input.job, task.input.threadId, ctx)
+          } catch (error) {
+            ctx.abortSignal?.throwIfAborted()
+            console.error('[jobs] Background update access revoked', error)
+            await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx)
             return
           }
         }
@@ -138,7 +163,7 @@ export function createDelivery(chat: Chat, getHarness: () => Harness, Post: Retu
       send: async (task, runtime, ctx) => {
         const { text, answer, error } = task.state.checkpoint
         await runtime.commit(async tx => {
-          const post = await tx.createTask(Post, { threadId: task.input.threadId, text }, { ownership: { kind: 'task', taskId: task.id } })
+          const post = await tx.createTask(Post, { threadId: task.input.threadId, text, job: task.input.job }, { ownership: { kind: 'task', taskId: task.id } })
           return {
             status: 'waiting',
             checkpoint: { phase: 'delivered', post, ...(answer === undefined ? {} : { answer }), ...(error ? { error } : {}) },

@@ -1,10 +1,11 @@
-import { defineTask } from '@earendil-works/pi-durable'
+import type { Context } from '@earendil-works/chord'
+import { defineTask, type TaskId } from '@earendil-works/pi-durable'
 import type { Chat } from 'chat'
 import { platformFor } from 'extensions/chat/adapters'
 
-export function createPost(chat: Chat) {
+export function createPost(chat: Chat, authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>) {
   return defineTask<
-    { threadId: string; text: string; files?: { data: string; filename: string; mimeType: string }[] },
+    { threadId: string; text: string; files?: { data: string; filename: string; mimeType: string }[]; job?: TaskId },
     { phase: 'send'; text: string; attempt?: number; retryAt?: number },
     null
   >({
@@ -15,6 +16,17 @@ export function createPost(chat: Chat) {
       send: async (task, runtime, ctx) => {
         const { text, attempt = 0, retryAt } = task.state.checkpoint
         if (retryAt !== undefined) await runtime.sleep(retryAt, ctx)
+        if (task.input.job !== undefined && authorize) {
+          try {
+            await authorize(task.input.job, task.input.threadId, ctx)
+          } catch (error) {
+            ctx.abortSignal?.throwIfAborted()
+            const message = error instanceof Error ? error.message : String(error)
+            console.error('[jobs] Background post access revoked', message)
+            await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'failed', error: { message } } }), ctx)
+            return
+          }
+        }
         const thread = chat.thread(task.input.threadId)
         const chunk = platformFor(chat, thread.id).replyChunk?.(text) ?? text
         ctx.abortSignal?.throwIfAborted()
