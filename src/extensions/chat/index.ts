@@ -19,7 +19,8 @@ import { beeperConfig } from 'extensions/chat/adapters/beeper/config'
 import { BeeperCheckpoints } from 'extensions/chat/adapters/beeper/state'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 import { connectChat, prepareConversation, restoreChat } from 'extensions/chat/bridge'
-import { createDelivery, deliveryHooks } from 'extensions/chat/delivery'
+import { createDelivery } from 'extensions/chat/delivery'
+import { createMessageConsumer } from 'extensions/chat/consumer'
 import { createPost } from 'extensions/chat/post'
 import { listSources, threadFor, Messages } from 'extensions/chat/state'
 import type { ScheduleChat } from 'extensions/schedules'
@@ -90,7 +91,8 @@ export async function createChatIntegration(
     await checkJob(job, getHarness(), { check: checkDestination, checkScope }, ctx)
   }
   const Post = createPost(chat, authorizeBackground, authorizeProject)
-  const Reply = createDelivery(chat, getHarness, Post, authorizeBackground, authorizeProject)
+  const consumer = createMessageConsumer(Post)
+  const Reply = createDelivery(chat, getHarness, Post, consumer, authorizeBackground)
   const rename = defineTool({
     name: 'rename_thread',
     description:
@@ -235,7 +237,6 @@ export async function createChatIntegration(
       // Keep the stored selection name stable while moving its implementation.
       name: 'clanker',
       tasks: [Reply, Post],
-      hooks: deliveryHooks(getHarness),
       tools: [rename],
       sections: [
         section('chat', async (input, ctx) => {
@@ -265,6 +266,7 @@ export async function createChatIntegration(
     webhooks: chat.webhooks,
     async restore(harness: Harness) {
       await chat.initialize()
+      await consumer.restore(harness)
       await restoreChat(chat, harness, agentFor)
     },
     async connect(onMessage?: Parameters<typeof connectChat>[5]) {
@@ -302,6 +304,7 @@ export async function createChatIntegration(
     close() {
       shutdown.abort()
       return (closing ??= (async () => {
+        await consumer.close()
         await chat.shutdown()
         await listening
       })())
