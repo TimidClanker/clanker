@@ -1,5 +1,6 @@
 import { defineDoc, type ConversationId, type EntryId, type TaskId } from '@earendil-works/pi-durable'
 import type { Author } from 'extensions/identity'
+import type { SourceEvidence } from 'extensions/sources/state'
 import type { ProjectScope } from 'extensions/projects/state'
 
 export type Job = {
@@ -14,6 +15,7 @@ export type Job = {
   revision: number
   createdAt: string
   updatedAt: string
+  sourceEvidence?: SourceEvidence[]
   projectScope?: ProjectScope
   progress?: string
   question?: string
@@ -42,7 +44,15 @@ export const JobCall = defineDoc<{ id?: TaskId; revision?: number }>({
   initial: () => ({})
 })
 export const active = (job: Job) => ['running', 'waiting', 'cancelling'].includes(job.status)
-export const describeJob = ({ owner: _owner, conversationId: _child, reported: _answer, threadId: _thread, instructions: _instructions, ...job }: Job) => job
+export const describeJob = ({
+  owner: _owner,
+  conversationId: _child,
+  reported: _answer,
+  threadId: _thread,
+  instructions: _instructions,
+  sourceEvidence: _sources,
+  ...job
+}: Job) => job
 
 /** A background worker is the sole driver of a shared shell/browser until it finishes or is cancelled. */
 export const WorkspaceJobs = defineDoc<Record<string, TaskId>>({

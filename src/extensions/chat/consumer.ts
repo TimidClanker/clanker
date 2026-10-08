@@ -4,6 +4,7 @@ import type { AssistantMessage } from '@earendil-works/pi-ai'
 import { AssistantEntry, watchEvents, type ConversationId, type Cursor, type EntryId, type EntryRecord, type Harness } from '@earendil-works/pi-durable'
 import { Messages, Threads, listSources } from 'extensions/chat/state'
 import { Delegation } from 'extensions/identity'
+import { SourceDisclosures } from 'extensions/sources/state'
 import { ProjectDisclosures } from 'extensions/projects/state'
 import { JobAnswerScopes } from 'extensions/jobs/state'
 import type { createPost } from 'extensions/chat/post'
@@ -39,6 +40,7 @@ export function createMessageConsumer(Post: ReturnType<typeof createPost>) {
         }
         const scopes = await tx.doc(JobAnswerScopes, conversationId)
         const disclosures = await tx.doc(ProjectDisclosures, conversationId)
+        const sourceDisclosures = await tx.doc(SourceDisclosures, conversationId)
         const ready = []
         let next = examined
         for (const entry of [...pending].sort((a, b) => a.id - b.id)) {
@@ -60,13 +62,14 @@ export function createMessageConsumer(Post: ReturnType<typeof createPost>) {
           const jobs = scopes.generations[generation.id]
           const projects = disclosures.generations[generation.id]
           if (jobs === undefined || projects === undefined) throw new Error('Assistant delivery authorization evidence unavailable')
-          ready.push({ entry: entry.id, text, jobs, projects })
+          const sources = sourceDisclosures.generations[generation.id] ?? []
+          ready.push({ entry: entry.id, text, jobs, projects, sources })
         }
         // All reads precede task writes; receipts, immutable envelopes and the cursor commit together.
-        for (const { entry, text, jobs, projects } of ready) {
+        for (const { entry, text, jobs, projects, sources } of ready) {
           const post = await tx.createTask(
             Post,
-            { threadId, text, jobs, projects, previous: messages.lastPost },
+            { threadId, text, jobs, projects, sources, previous: messages.lastPost },
             { conversationId, ownership: { kind: 'conversation' } }
           )
           messages.replies ??= {}

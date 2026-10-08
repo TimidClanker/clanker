@@ -7,6 +7,7 @@ import { JobInputs, Jobs, type Job } from 'extensions/jobs/state'
 
 export type JobChat = Pick<ScheduleChat, 'privateIdentity' | 'check' | 'enqueue'> & {
   checkScope?(job: Job, ctx: Context, tx?: Tx): Promise<void>
+  captureSources?(tx: Tx, api: ToolExecutionApi, job: { sourceEvidence?: Job['sourceEvidence'] }, ctx: Context, genuine: boolean): Promise<void>
   supplyJobs?(jobs: Job[], api: ToolExecutionApi, ctx: Context): Promise<void>
 }
 

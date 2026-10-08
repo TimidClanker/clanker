@@ -64,6 +64,7 @@ export async function connectChat(
           Reply,
           {
             threadId: thread.id,
+            genuine: true,
             messageId: message.id,
             text: `Sender: ${JSON.stringify({ messageId: message.id, identityId: author.identityId, displayName: author.displayName })}\n${message.text.trim() || 'Please describe this image.'}`,
             images,

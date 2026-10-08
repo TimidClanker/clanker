@@ -35,6 +35,7 @@ const conflict = (actual: number, expected: number | undefined) => {
 export function createProjects(chat: ProjectChat, getHarness: () => Harness) {
   const access = createProjectAccess(chat, getHarness)
   return {
+    access,
     checkScope: access.checkScope,
     checkDisclosure: access.checkDisclosure,
     async supplyJobs(jobs: Job[], api: ToolExecutionApi, ctx: Context) {

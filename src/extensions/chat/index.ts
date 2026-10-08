@@ -7,7 +7,9 @@ import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section, type DocumentReader, type Harness, type TaskId } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
 import { findIdentity, sourceConversation, recordAutomatedInput, recordMessageAuthor, type IdentityAccess } from 'extensions/identity'
-import { currentDisclosures } from 'extensions/projects/access'
+import type { createSources } from 'extensions/sources'
+import type { createBeeperObserver } from 'extensions/sources/connectors'
+import { currentDisclosures, transactionReader } from 'extensions/projects/access'
 import type { ProjectDisclosure } from 'extensions/projects/state'
 import { Jobs } from 'extensions/jobs/state'
 import { checkJob, type JobChat } from 'extensions/jobs/task'
@@ -31,30 +33,34 @@ export async function createChatIntegration(
   selection: ReturnType<typeof selectModel>,
   getHarness: () => Harness,
   useAgent: <T>(work: (harness: Harness) => Promise<T>) => Promise<T>,
-  adapters?: Record<string, PlatformAdapter>
+  adapters?: Record<string, PlatformAdapter>,
+  observer?: ReturnType<typeof createBeeperObserver>
 ) {
   if (!adapters) {
     const config = await beeperConfig()
     adapters = {
       discord: new Discord(),
-      ...(config.accessToken && config.accountIDs.length
+      ...(config.accessToken && (config.accountIDs.length || observer?.accountIDs.length)
         ? {
-            beeper: new Beeper(config, {
-              load: scope =>
-                useAgent(harness =>
-                  harness.commit(async tx => {
-                    const checkpoints = await tx.doc(BeeperCheckpoints)
-                    const now = Date.now()
-                    return { ...(checkpoints[scope] ??= { since: now, syncedAt: now }) }
-                  }, BACKGROUND_CONTEXT)
-                ),
-              save: (scope, checkpoint) =>
-                useAgent(harness =>
-                  harness.commit(async tx => {
-                    ;(await tx.doc(BeeperCheckpoints))[scope] = checkpoint
-                  }, BACKGROUND_CONTEXT)
-                )
-            })
+            beeper: new Beeper(
+              config,
+              {
+                load: (scope, since = Date.now()) =>
+                  useAgent(harness =>
+                    harness.commit(async tx => {
+                      const checkpoints = await tx.doc(BeeperCheckpoints)
+                      return { ...(checkpoints[scope] ??= { since, syncedAt: since }) }
+                    }, BACKGROUND_CONTEXT)
+                  ),
+                save: (scope, checkpoint) =>
+                  useAgent(harness =>
+                    harness.commit(async tx => {
+                      ;(await tx.doc(BeeperCheckpoints))[scope] = checkpoint
+                    }, BACKGROUND_CONTEXT)
+                  )
+              },
+              observer
+            )
           }
         : {})
     }
@@ -88,11 +94,44 @@ export async function createChatIntegration(
   const authorizeBackground = async (id: TaskId, threadId: string, ctx: Context) => {
     const job = (await getHarness().snapshot(Jobs, ctx))!.jobs[id]!
     if (job.threadId !== threadId) throw new Error('Background update destination changed')
-    await checkJob(job, getHarness(), { check: checkDestination, checkScope }, ctx)
+    await checkJob(
+      job,
+      getHarness(),
+      {
+        check: checkDestination,
+        checkScope: async (job, ctx, tx) => {
+          await checkScope?.(job, ctx, tx)
+          for (const value of job.sourceEvidence ?? []) {
+            if (!sourceAccess) throw new Error('Source job verification unavailable')
+            await sourceAccess.checkEvidence(value, undefined, ctx, tx)
+          }
+        }
+      },
+      ctx
+    )
   }
-  const Post = createPost(chat, authorizeBackground, authorizeProject)
+  let sourceAccess: ReturnType<typeof createSources> | undefined
+  const Post = createPost(
+    chat,
+    authorizeBackground,
+    authorizeProject,
+    (value, threadId, ctx) => {
+      if (!sourceAccess) throw new Error('Source access unavailable')
+      return sourceAccess.checkEvidence(value, threadId, ctx)
+    },
+    (notice, threadId, ctx) => {
+      if (!sourceAccess) throw new Error('Source notification unavailable')
+      return sourceAccess.prepareNotice(notice, threadId, ctx)
+    },
+    (tx, notice, conversationId, text, ctx) => {
+      if (!sourceAccess) throw new Error('Source notification receipt unavailable')
+      return sourceAccess.recordNotice(tx, notice, conversationId, text, ctx)
+    }
+  )
   const consumer = createMessageConsumer(Post)
-  const Reply = createDelivery(chat, getHarness, Post, consumer, authorizeBackground)
+  const Reply = createDelivery(chat, getHarness, Post, consumer, authorizeBackground, (h, c, g, work, ctx) =>
+    sourceAccess ? sourceAccess.admit(h, c, g, work, ctx) : work()
+  )
   const rename = defineTool({
     name: 'rename_thread',
     description:
@@ -133,6 +172,34 @@ export async function createChatIntegration(
   const accountLinks = createAccountLinking(identityAccess, getHarness)
 
   return {
+    setSourceAccess(access: ReturnType<typeof createSources>) {
+      sourceAccess = access
+    },
+    sources: {
+      async notice(tx, conversationId, threadId, sourceNotice) {
+        const messages = await tx.doc(Messages, conversationId)
+        const post = await tx.createTask(
+          Post,
+          { threadId, text: '', sourceNotice, previous: messages.lastPost },
+          { conversationId, ownership: { kind: 'conversation' } }
+        )
+        messages.lastPost = post
+        return post
+      },
+      async refreshed(tx, conversationId) {
+        const messages = await tx.doc(Messages, conversationId)
+        const threadId = await threadFor(transactionReader(tx), conversationId, BACKGROUND_CONTEXT)
+        messages.lastPost = await tx.createTask(
+          Post,
+          {
+            threadId,
+            text: 'Active model context was refreshed for withdrawn source access. Saved chat was not deleted; I will handle your new message normally.',
+            previous: messages.lastPost
+          },
+          { conversationId, ownership: { kind: 'conversation' } }
+        )
+      }
+    } satisfies Pick<Parameters<typeof createSources>[3], 'notice' | 'refreshed'>,
     setProjectAccess(access: {
       checkScope: NonNullable<JobChat['checkScope']>
       checkDisclosure: NonNullable<typeof checkDisclosure>
@@ -146,6 +213,7 @@ export async function createChatIntegration(
       const threadId = await threadFor(api, api.conversationId, ctx)
       const jobs = await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
       const projects = await currentDisclosures(api, api.conversationId, ctx)
+      const sources = (await sourceAccess?.evidence(api, api.conversationId, ctx)) ?? []
       const post = await api.commit(async tx => {
         const messages = await tx.doc(Messages, api.conversationId)
         const post = await tx.createTask(
@@ -155,6 +223,7 @@ export async function createChatIntegration(
             text: '',
             jobs,
             projects,
+            sources,
             previous: messages.lastPost,
             files: images.map((image, index) => ({
               data: image.data,
@@ -210,11 +279,17 @@ export async function createChatIntegration(
       checkScope: async (job, ctx, tx) => {
         if (job.projectScope?.length && !checkScope) throw new Error('Project access verification is unavailable')
         await checkScope?.(job, ctx, tx)
+        for (const value of job.sourceEvidence ?? []) {
+          if (!sourceAccess) throw new Error('Source job verification unavailable')
+          await sourceAccess.checkEvidence(value, undefined, ctx, tx)
+        }
       },
       supplyJobs: async (jobs, api, ctx) => {
         if (jobs.some(job => job.projectScope?.length) && !supplyJobs) throw new Error('Project disclosure verification is unavailable')
         await supplyJobs?.(jobs, api, ctx)
+        await sourceAccess?.supplyJobs(jobs, api, ctx)
       },
+      captureSources: (tx, api, job, ctx, genuine) => sourceAccess?.captureJob(tx, api, job, ctx, genuine) ?? Promise.resolve(),
       prepare: (tx, destination) => prepareConversation(tx, destination.threadId, agentFor(destination.threadId)),
       async enqueue(tx, conversationId, { schedule, requestId, text, owner, threadId, internal, job }) {
         await recordAutomatedInput(tx, conversationId, requestId, owner, schedule === undefined ? 'background' : 'schedule', job)

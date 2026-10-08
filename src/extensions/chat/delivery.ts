@@ -13,10 +13,18 @@ export function createDelivery(
   getHarness: () => Harness,
   Post: ReturnType<typeof createPost>,
   consumer: ReturnType<typeof createMessageConsumer>,
-  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>
+  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>,
+  admit: <T>(
+    harness: Harness,
+    conversationId: import('@earendil-works/pi-durable').ConversationId,
+    genuine: boolean,
+    work: () => Promise<T>,
+    ctx: Context
+  ) => Promise<T> = (_h, _c, _g, work) => work()
 ) {
   return defineTask<
     {
+      genuine?: boolean
       threadId: string
       messageId: string
       text: string
@@ -64,13 +72,20 @@ export function createDelivery(
         await consumer.attach(getHarness(), runtime.conversationId, task.input.threadId)
         // Admit input before waiting for earlier replies, so it can steer an active run.
         const conversation = (await runtime.conversation(runtime.conversationId, ctx))!
-        const submission = await conversation.submit(
-          {
-            type: 'input',
-            content: task.input.images?.length ? [{ type: 'text', text: task.input.text }, ...task.input.images] : task.input.text,
-            requestId: task.input.messageId,
-            whenBusy: schedule === undefined && !task.input.internal ? 'steer' : 'followUp'
-          },
+        const submission = await admit(
+          getHarness(),
+          runtime.conversationId,
+          !!task.input.genuine,
+          () =>
+            conversation.submit(
+              {
+                type: 'input',
+                content: task.input.images?.length ? [{ type: 'text', text: task.input.text }, ...task.input.images] : task.input.text,
+                requestId: task.input.messageId,
+                whenBusy: schedule === undefined && !task.input.internal ? 'steer' : 'followUp'
+              },
+              ctx
+            ),
           ctx
         )
         // Close the race with cancellation during admission. Already-placed input must still get its response.

@@ -262,6 +262,8 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
               .filter(active)
               .map(job => canonicalId(identities, job.owner.identityId))
             if (running.filter(id => id === owner).length >= 2) throw new Error('At most two active background tasks per owner; finish or cancel one first')
+            const evidence: { sourceEvidence?: Job['sourceEvidence'] } = {}
+            await chat.captureSources?.(tx, api, evidence, ctx, true)
             const anchor = await tx.createTask(Anchor, null, background)
             const child = await tx.createConversation({ ownership: { kind: 'task', taskId: anchor } })
             await configure(tx, child.id, {
@@ -282,6 +284,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
               owner: author,
               title: title.trim(),
               instructions: text,
+              ...evidence,
               status: 'running',
               revision: 1,
               createdAt: now,
@@ -332,11 +335,14 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
         execute: async ({ id, text }, api, ctx) => {
           const job = await owned(api, id, ctx)
           await checkJob(job, getHarness(), chat, ctx)
+          const genuine = (await getRequestActors(api, getHarness(), api.conversationId, ctx, 'schedules')).length > 0
           await api.commit(async tx => {
             const receipt = await tx.doc(JobCall, api.taskId)
             if (receipt.id) return
             const current = (await tx.doc(Jobs)).jobs[id]!
             if (!['running', 'waiting'].includes(current.status)) throw new Error(`Cannot steer a ${current.status} task; start a new task if needed`)
+            await chat.captureSources?.(tx, api, current, ctx, genuine)
+            await chat.checkScope?.(current, ctx, tx)
             current.revision++
             current.instructions += `\n\nRevision ${current.revision} clarification (supersedes conflicting earlier directions):\n${text}`
             current.status = 'running'

@@ -15,6 +15,8 @@ import {
 import type { PlatformAdapter } from 'extensions/chat/adapters'
 import type { PlatformAccount } from 'extensions/identity'
 import type { beeperConfig } from 'extensions/chat/adapters/beeper/config'
+import type { createBeeperObserver } from 'extensions/sources/connectors'
+import { bindingFingerprint } from 'extensions/sources/state'
 import type { BeeperCheckpoint } from 'extensions/chat/adapters/beeper/state'
 
 const format = new (class extends BaseFormatConverter {
@@ -40,15 +42,18 @@ export class Beeper implements PlatformAdapter {
   constructor(
     private config: Awaited<ReturnType<typeof beeperConfig>>,
     private checkpoints: {
-      load(scope: string): Promise<BeeperCheckpoint>
+      load(scope: string, since?: number): Promise<BeeperCheckpoint>
       save(scope: string, checkpoint: BeeperCheckpoint): Promise<void>
-    }
+    },
+    private observer?: ReturnType<typeof createBeeperObserver>
   ) {}
 
   async initialize(chat: ChatInstance) {
     this.chat = chat
     if (!this.config.accessToken) throw new Error('Beeper needs authentication. Run bun run beeper login.')
-    if (!this.config.accountIDs.length) throw new Error('Select Beeper accounts with bun run beeper use <account-id>.')
+    if (!this.config.accountIDs.length && !this.observer?.accountIDs.length) throw new Error('Select Beeper accounts with bun run beeper use <account-id>.')
+    if (this.observer?.accountIDs.some(id => this.config.accountIDs.includes(id)))
+      throw new Error('Passive observer accounts must be separate from bot accounts')
     this.client = new BeeperDesktop({ ...this.config, maxRetries: 0, timeout: 15_000 })
     // A separate cursor per endpoint/account selection prevents replaying another account's history.
     this.checkpointScope = JSON.stringify([this.config.baseURL, [...this.config.accountIDs].sort()])
@@ -239,6 +244,11 @@ export class Beeper implements PlatformAdapter {
   }
 
   private async receive(raw: BeeperDesktop.Message) {
+    // Passive personal-account observations never enter assistant admission or identity authorship.
+    if (this.observer?.accountIDs.includes(raw.accountID)) {
+      await this.observer.receive(raw)
+      return
+    }
     if (!this.config.accountIDs.includes(raw.accountID)) return
     // Only incoming messages trigger the agent. This also suppresses pending and confirmed reply echoes.
     if (raw.isSender || raw.isDeleted || raw.isHidden || raw.type === 'REACTION' || raw.type === 'NOTICE') return
@@ -259,35 +269,62 @@ export class Beeper implements PlatformAdapter {
   }
 
   private async reconcile(signal: AbortSignal) {
+    const observers = (await this.observer?.selections()) ?? []
+    if (!this.config.accountIDs.length && !observers.length) return
     const until = Date.now()
-    const after = Math.max(this.checkpoint.since, this.checkpoint.syncedAt - 60_000)
-    if (until <= after) return
-    const messages: BeeperDesktop.Message[] = []
-    for await (const message of this.client.messages.search(
-      {
-        accountIDs: this.config.accountIDs,
-        dateAfter: new Date(after).toISOString(),
-        dateBefore: new Date(until).toISOString(),
-        sender: 'others',
-        excludeLowPriority: false,
-        includeMuted: true
-      },
-      { signal }
-    ))
-      messages.push(message)
-    messages.sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-    await this.enqueue(async () => {
-      for (const message of messages) {
-        signal.throwIfAborted()
-        await this.receive(message)
-      }
-    })
-    const checkpoint = { ...this.checkpoint, syncedAt: until }
-    await this.checkpoints.save(this.checkpointScope, checkpoint)
-    this.checkpoint = checkpoint
+    // Preserve the existing bot cursor; each observer has its own resource-scoped checkpoint.
+    const selections = [
+      ...(this.config.accountIDs.length
+        ? [
+            {
+              scope: this.checkpointScope,
+              checkpoint: this.checkpoint,
+              since: this.checkpoint.since,
+              accountIDs: this.config.accountIDs,
+              chatIDs: undefined,
+              sender: 'others'
+            }
+          ]
+        : []),
+      ...(await Promise.all(
+        observers.map(async binding => {
+          const scope = JSON.stringify(['source', this.config.baseURL, bindingFingerprint(binding)])
+          const since = await this.observer!.since(binding.id)
+          return {
+            scope,
+            checkpoint: await this.checkpoints.load(scope, since || until),
+            since,
+            accountIDs: [binding.accountId],
+            chatIDs: binding.chatIds,
+            sender: undefined
+          }
+        })
+      ))
+    ]
+    for (const { scope, checkpoint, since, ...selection } of selections) {
+      const after = Math.max(since, checkpoint.since, checkpoint.syncedAt - 60_000)
+      if (until <= after) continue
+      const messages: BeeperDesktop.Message[] = []
+      for await (const message of this.client.messages.search(
+        { ...selection, dateAfter: new Date(after).toISOString(), dateBefore: new Date(until).toISOString(), excludeLowPriority: false, includeMuted: true },
+        { signal }
+      ))
+        messages.push(message)
+      messages.sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      await this.enqueue(async () => {
+        for (const message of messages) {
+          signal.throwIfAborted()
+          await this.receive(message)
+        }
+      })
+      const next = { ...checkpoint, syncedAt: until }
+      await this.checkpoints.save(scope, next)
+      if (scope === this.checkpointScope) this.checkpoint = next
+    }
   }
 
   private async listen(signal: AbortSignal) {
+    if (!this.config.accountIDs.length && !(await this.observer?.activeAccountIDs())?.length) return
     const info = await this.client.info.retrieve({ signal })
     const url = new URL(info.endpoints.ws_events, this.config.baseURL)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
