@@ -7,13 +7,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import type { Storage } from '@earendil-works/pi-durable'
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node'
 import { openPostgresStorage } from 'storage/postgres'
-
-async function databaseUrl() {
-  if (process.env.DATABASE_URL?.trim()) return process.env.DATABASE_URL.trim()
-  const file = Bun.file(join(process.env.SECRETS_DIR ?? './secrets', 'database.json'))
-  const saved: { url?: string } = (await file.exists()) ? await file.json() : {}
-  return saved.url?.trim() || 'sqlite://./workspace/durable.sqlite'
-}
+import { databaseUrl, isPostgresUrl } from 'storage/config'
 
 async function openSqliteStorage(path: string, signal?: AbortSignal): Promise<Storage> {
   if (path === ':memory:') return openNodeSqliteStorage(path)
@@ -60,7 +54,7 @@ export async function openStorage(url?: string, options: { signal?: AbortSignal;
   options.signal?.throwIfAborted()
   url = url?.trim() || (await databaseUrl())
   let storage: Storage
-  if (/^postgres(?:ql)?:\/\//i.test(url)) {
+  if (isPostgresUrl(url)) {
     storage = await openPostgresStorage(url, options)
   } else {
     let path = url

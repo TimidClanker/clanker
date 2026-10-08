@@ -2,7 +2,7 @@ import type { Context } from '@earendil-works/chord'
 import { MIMEType } from 'node:util'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import { Chat } from 'chat'
-import { createMemoryState } from '@chat-adapter/state-memory'
+import { createTransportState } from 'extensions/chat/transport-state'
 import { Type } from '@earendil-works/pi-ai'
 import { defineExtension, defineTool, section, type DocumentReader, type Harness, type TaskId } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
@@ -61,7 +61,7 @@ export async function createChatIntegration(
   const chat = new Chat({
     userName: 'clanker',
     adapters,
-    state: createMemoryState(),
+    state: await createTransportState(),
     concurrency: { strategy: 'concurrent', maxConcurrent: 1 },
     logger: 'info'
   })
