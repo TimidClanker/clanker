@@ -48,7 +48,7 @@ export async function sourceConversation(read: DocumentReader, conversationId: C
 
 export const accountKey = ({ platform, scope, userId }: PlatformAccount) => JSON.stringify([platform, scope, userId])
 
-const AutomatedInputs = defineDoc<Record<string, true | (Author & { kind?: 'schedule' | 'background' })>>({
+const AutomatedInputs = defineDoc<Record<string, true | (Author & { kind?: 'schedule' | 'background'; jobId?: TaskId })>>({
   kind: 'identity.automated-inputs',
   version: 1,
   scope: 'conversation',
@@ -58,8 +58,17 @@ const AutomatedInputs = defineDoc<Record<string, true | (Author & { kind?: 'sche
 })
 
 /** Host-only provenance: automated input is not a new user authorization, even when it names an owner. */
-export async function recordAutomatedInput(tx: Tx, conversationId: ConversationId, requestId: string, owner?: Author, kind?: 'schedule' | 'background') {
-  ;(await tx.doc(AutomatedInputs, conversationId))[JSON.stringify(requestId)] = owner ? { ...owner, ...(kind ? { kind } : {}) } : true
+export async function recordAutomatedInput(
+  tx: Tx,
+  conversationId: ConversationId,
+  requestId: string,
+  owner?: Author,
+  kind?: 'schedule' | 'background',
+  jobId?: TaskId
+) {
+  ;(await tx.doc(AutomatedInputs, conversationId))[JSON.stringify(requestId)] = owner
+    ? { ...owner, ...(kind ? { kind } : {}), ...(jobId !== undefined ? { jobId } : {}) }
+    : true
 }
 
 export function canonicalId(identities: Record<string, { linkedTo?: string }>, id: string): string {
@@ -170,4 +179,17 @@ export async function getRequestActors(
     authors.push({ identityId, account: author.account, displayName: author.displayName })
   }
   return authors
+}
+
+/** Background provenance is host-recorded, never parsed from report text. */
+export async function getBackgroundInputJobs(read: DocumentReader, harness: Pick<Harness, 'submission'>, conversationId: ConversationId, ctx: Context) {
+  const inputs = (await read.snapshot(LiveDoc, conversationId, ctx))?.run?.inputs ?? []
+  const automated = await read.snapshot(AutomatedInputs, conversationId, ctx)
+  const jobs: TaskId[] = []
+  for (const id of inputs) {
+    const submission = await harness.submission(id, ctx)
+    const owner = automated?.[JSON.stringify((await submission?.status(ctx))?.requestId)]
+    if (owner && owner !== true && owner.jobId !== undefined) jobs.push(owner.jobId)
+  }
+  return [...new Set(jobs)]
 }

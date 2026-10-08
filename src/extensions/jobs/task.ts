@@ -1,17 +1,22 @@
 import type { Context } from '@earendil-works/chord'
 import type { AssistantMessage } from '@earendil-works/pi-ai'
-import { AssistantEntry, defineTask, type EntryId, type Harness, type TaskId, type Tx } from '@earendil-works/pi-durable'
+import { AssistantEntry, defineTask, type EntryId, type Harness, type TaskId, type Tx, type ToolExecutionApi } from '@earendil-works/pi-durable'
 import { findIdentity, recordAutomatedInput, resolveIdentity } from 'extensions/identity'
 import type { ScheduleChat } from 'extensions/schedules'
 import { JobInputs, Jobs, type Job } from 'extensions/jobs/state'
 
-export type JobChat = Pick<ScheduleChat, 'privateIdentity' | 'check' | 'enqueue'>
+export type JobChat = Pick<ScheduleChat, 'privateIdentity' | 'check' | 'enqueue'> & {
+  checkScope?(job: Job, ctx: Context, tx?: Tx): Promise<void>
+  supplyJobs?(jobs: Job[], api: ToolExecutionApi, ctx: Context): Promise<void>
+}
 
-export async function checkJob(job: Job, harness: Harness, chat: Pick<JobChat, 'check'>, ctx: Context) {
+export async function checkJob(job: Job, harness: Harness, chat: Pick<JobChat, 'check' | 'checkScope'>, ctx: Context) {
   if ((await findIdentity(harness, job.owner.account, ctx)) !== (await resolveIdentity(harness, job.owner.identityId, ctx))) {
     throw new Error('The account that delegated this task no longer belongs to its owner')
   }
   await chat.check({ threadId: job.threadId, title: job.title }, job.owner.account, ctx)
+  if (job.projectScope?.length && !chat.checkScope) throw new Error('Project access verification is unavailable')
+  await chat.checkScope?.(job, ctx)
 }
 
 export async function notifyJob(tx: Tx, chat: JobChat, job: Job, requestId: string, kind: string, text: string) {
@@ -96,7 +101,14 @@ export function createJobTasks(chat: JobChat, getHarness: () => Harness) {
             current.result = text || error || 'Finished without a text result.'
             if (answerId !== undefined) current.reported = answerId
             current.updatedAt = new Date(runtime.now()).toISOString()
-            if (permitted) await notifyJob(tx, chat, current, `job-result:${task.id}`, current.status, current.result)
+            if (
+              permitted &&
+              (await (chat.checkScope?.(current, ctx, tx).then(
+                () => true,
+                () => false
+              ) ?? true))
+            )
+              await notifyJob(tx, chat, current, `job-result:${task.id}`, current.status, current.result)
           }
           return { status: 'terminal', outcome: { status: 'completed', result: null } }
         }, ctx)
@@ -121,7 +133,13 @@ export function createJobTasks(chat: JobChat, getHarness: () => Harness) {
           const current = (await tx.doc(Jobs)).jobs[task.input.id]!
           current.status = 'cancelled'
           current.updatedAt = new Date(runtime.now()).toISOString()
-          if (permitted)
+          if (
+            permitted &&
+            (await (chat.checkScope?.(current, ctx, tx).then(
+              () => true,
+              () => false
+            ) ?? true))
+          )
             await notifyJob(tx, chat, current, `job-cancelled:${task.id}`, 'cancelled', 'Execution stopped. Completed external actions are not rolled back.')
           return { status: 'terminal', outcome: { status: 'completed', result: null } }
         }, ctx)

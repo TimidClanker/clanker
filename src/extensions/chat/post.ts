@@ -1,11 +1,23 @@
 import type { Context } from '@earendil-works/chord'
 import { defineTask, type TaskId } from '@earendil-works/pi-durable'
 import type { Chat } from 'chat'
+import type { ProjectDisclosure } from 'extensions/projects/state'
 import { platformFor } from 'extensions/chat/adapters'
 
-export function createPost(chat: Chat, authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>) {
+export function createPost(
+  chat: Chat,
+  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>,
+  authorizeProject?: (value: ProjectDisclosure, threadId: string, ctx: Context) => Promise<void>
+) {
   return defineTask<
-    { threadId: string; text: string; files?: { data: string; filename: string; mimeType: string }[]; job?: TaskId },
+    {
+      threadId: string
+      text: string
+      files?: { data: string; filename: string; mimeType: string }[]
+      job?: TaskId
+      jobs?: TaskId[]
+      projects?: ProjectDisclosure[]
+    },
     { phase: 'send'; text: string; attempt?: number; retryAt?: number },
     null
   >({
@@ -16,13 +28,25 @@ export function createPost(chat: Chat, authorize?: (job: TaskId, threadId: strin
       send: async (task, runtime, ctx) => {
         const { text, attempt = 0, retryAt } = task.state.checkpoint
         if (retryAt !== undefined) await runtime.sleep(retryAt, ctx)
-        if (task.input.job !== undefined && authorize) {
+        for (const job of new Set([...(task.input.jobs ?? []), ...(task.input.job === undefined ? [] : [task.input.job])])) {
+          if (!authorize) throw new Error('Background post authorization unavailable')
           try {
-            await authorize(task.input.job, task.input.threadId, ctx)
+            await authorize(job, task.input.threadId, ctx)
           } catch (error) {
             ctx.abortSignal?.throwIfAborted()
             const message = error instanceof Error ? error.message : String(error)
             console.error('[jobs] Background post access revoked', message)
+            await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'failed', error: { message } } }), ctx)
+            return
+          }
+        }
+        for (const value of task.input.projects ?? []) {
+          if (!authorizeProject) throw new Error('Project post authorization unavailable')
+          try {
+            await authorizeProject(value, task.input.threadId, ctx)
+          } catch (error) {
+            ctx.abortSignal?.throwIfAborted()
+            const message = error instanceof Error ? error.message : String(error)
             await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'failed', error: { message } } }), ctx)
             return
           }
