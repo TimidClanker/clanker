@@ -1,5 +1,5 @@
 import type { Context } from '@earendil-works/chord'
-import { defineDoc, type ConversationId, type DocumentReader, type EntryId, type TaskId } from '@earendil-works/pi-durable'
+import { defineDoc, type ConversationId, type DocumentReader, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
 import { sourceConversation } from 'extensions/identity'
 
 export const Threads = defineDoc<{ threads: Record<string, ConversationId> }>({
@@ -20,7 +20,16 @@ export async function threadFor(read: DocumentReader, conversationId: Conversati
   return source.threadId
 }
 
-export const Messages = defineDoc<{ received: Record<string, TaskId>; lastTask: TaskId | null; lastAnswer?: EntryId }>({
+export const Messages = defineDoc<{
+  received: Record<string, TaskId>
+  lastTask: TaskId | null
+  lastAnswer?: EntryId
+  // Entry receipts and the post-only delivery chain survive replay and coalesced steers.
+  replies?: Record<string, TaskId<null>>
+  lastPost?: TaskId<null>
+  // Exact inputs of each provider request, not a timing-based transcript range.
+  generations?: Record<string, SubmissionId[]>
+}>({
   kind: 'clanker.messages',
   version: 1,
   scope: 'conversation',

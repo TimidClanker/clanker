@@ -164,23 +164,26 @@ export function createProjectAccess(chat: ProjectChat, getHarness: () => Harness
       // Recheck slow read/list/section completion before supplying any content.
       for (const value of values) await checkDisclosure(value, undefined, ctx, tx)
       if (owner.job && !owner.report) return // Worker output already carries immutable Jobs scope.
-      const live = (await tx.doc(LiveDoc, conversationId)).run
+      const state = await tx.doc(LiveDoc, conversationId)
+      const live = state.run
       if (!live || live.inputs[0] !== run.inputs[0]) throw new Error('Project disclosure run changed')
       const scopes = await tx.doc(ProjectDisclosures, conversationId)
       scopes.runs[run.inputs[0]!] ??= []
       const grants = scopes.runs[run.inputs[0]!]!
       for (const value of values) if (!grants.some(previous => JSON.stringify(previous) === JSON.stringify(value))) grants.push(value)
-      scopes.generations[live.taskId] = grants.map(value => JSON.parse(JSON.stringify(value)))
+      // Tool reads authorize the next generation, not the already committed tool-calling message.
+      if (!state.tools) scopes.generations[live.taskId] = grants.map(value => JSON.parse(JSON.stringify(value)))
     }, ctx)
   }
-  async function guard(api: HookApi, ctx: Context) {
+  async function guard(api: HookApi, ctx: Context, generation = false) {
     try {
       const values = await currentDisclosures(api, api.conversationId, ctx)
       for (const value of values) await checkDisclosure(value, undefined, ctx)
-      if (values.length)
+      if (generation)
         await getHarness().commit(async tx => {
-          const run = (await tx.doc(LiveDoc, api.conversationId)).run
-          if (run) (await tx.doc(ProjectDisclosures, api.conversationId)).generations[run.taskId] = values.map(value => JSON.parse(JSON.stringify(value)))
+          // Explicit empty is verified provenance too. Tool guards still recheck cumulative run grants,
+          // but must not retag a message which has already committed.
+          ;(await tx.doc(ProjectDisclosures, api.conversationId)).generations[api.taskId] = values.map(value => JSON.parse(JSON.stringify(value)))
         }, ctx)
     } catch (error) {
       await getHarness().abortTask(api.taskId, ctx)

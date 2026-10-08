@@ -19,7 +19,7 @@ import { beeperConfig } from 'extensions/chat/adapters/beeper/config'
 import { BeeperCheckpoints } from 'extensions/chat/adapters/beeper/state'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 import { connectChat, prepareConversation, restoreChat } from 'extensions/chat/bridge'
-import { createDelivery } from 'extensions/chat/delivery'
+import { createDelivery, deliveryHooks } from 'extensions/chat/delivery'
 import { createPost } from 'extensions/chat/post'
 import { listSources, threadFor, Messages } from 'extensions/chat/state'
 import type { ScheduleChat } from 'extensions/schedules'
@@ -142,22 +142,29 @@ export async function createChatIntegration(
     },
     media: (async (images, api, ctx) => {
       const threadId = await threadFor(api, api.conversationId, ctx)
-      const post = await api.createTask(
-        Post,
-        {
-          threadId,
-          text: '',
-          jobs: await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx),
-          projects: await currentDisclosures(api, api.conversationId, ctx),
-          files: images.map((image, index) => ({
-            data: image.data,
-            mimeType: image.mimeType,
-            filename: `generated-${index + 1}.${new MIMEType(image.mimeType).subtype.replace('svg+xml', 'svg')}`
-          }))
-        },
-        { ownership: { kind: 'conversation' } },
-        ctx
-      )
+      const jobs = await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
+      const projects = await currentDisclosures(api, api.conversationId, ctx)
+      const post = await api.commit(async tx => {
+        const messages = await tx.doc(Messages, api.conversationId)
+        const post = await tx.createTask(
+          Post,
+          {
+            threadId,
+            text: '',
+            jobs,
+            projects,
+            previous: messages.lastPost,
+            files: images.map((image, index) => ({
+              data: image.data,
+              mimeType: image.mimeType,
+              filename: `generated-${index + 1}.${new MIMEType(image.mimeType).subtype.replace('svg+xml', 'svg')}`
+            }))
+          },
+          { ownership: { kind: 'conversation' } }
+        )
+        messages.lastPost = post
+        return post
+      }, ctx)
       const task = await api.waitForTask(post, ctx)
       if (task.state.outcome.status !== 'completed') throw new Error('Generated images could not be delivered to chat.')
     }) satisfies MediaDelivery,
@@ -228,6 +235,7 @@ export async function createChatIntegration(
       // Keep the stored selection name stable while moving its implementation.
       name: 'clanker',
       tasks: [Reply, Post],
+      hooks: deliveryHooks(getHarness),
       tools: [rename],
       sections: [
         section('chat', async (input, ctx) => {

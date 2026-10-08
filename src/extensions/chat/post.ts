@@ -17,14 +17,25 @@ export function createPost(
       job?: TaskId
       jobs?: TaskId[]
       projects?: ProjectDisclosure[]
+      previous?: TaskId<null>
     },
-    { phase: 'send'; text: string; attempt?: number; retryAt?: number },
+    { phase: 'queue' } | { phase: 'send'; text: string; attempt?: number; retryAt?: number },
     null
   >({
     name: 'chat.post',
     version: 1,
-    initial: input => ({ phase: 'send', text: input.text }),
+    initial: () => ({ phase: 'queue' }),
     phases: {
+      queue: (task, runtime, ctx) =>
+        runtime.commit(
+          () => ({
+            status: 'waiting',
+            checkpoint: { phase: 'send', text: task.input.text },
+            on: task.input.previous === undefined ? [] : [task.input.previous],
+            policy: 'allSettled'
+          }),
+          ctx
+        ),
       send: async (task, runtime, ctx) => {
         const { text, attempt = 0, retryAt } = task.state.checkpoint
         if (retryAt !== undefined) await runtime.sleep(retryAt, ctx)

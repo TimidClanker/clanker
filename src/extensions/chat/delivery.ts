@@ -1,12 +1,42 @@
 import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai'
-import { AssistantEntry, defineTask, InboxDoc, LiveDoc, type Harness, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
+import {
+  AssistantEntry,
+  defineTask,
+  GenerationTask,
+  hook,
+  InboxDoc,
+  LiveDoc,
+  type Harness,
+  type EntryId,
+  type SubmissionId,
+  type TaskId,
+  type ConversationId,
+  type Cursor
+} from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord'
 import type { Chat } from 'chat'
 import { ProjectDisclosures, type ProjectDisclosure } from 'extensions/projects/state'
 import { JobAnswerScopes } from 'extensions/jobs/state'
-import { Messages } from 'extensions/chat/state'
+import { Messages, Threads } from 'extensions/chat/state'
+import { Delegation } from 'extensions/identity'
 import { showTyping } from 'extensions/chat/typing'
 import type { createPost } from 'extensions/chat/post'
+
+export function deliveryHooks(getHarness: () => Harness) {
+  return [
+    hook(GenerationTask, {
+      beforeRequest: async (_request, api, ctx) => {
+        await getHarness().commit(async tx => {
+          const run = (await tx.doc(LiveDoc, api.conversationId)).run
+          if (!run || run.taskId !== api.taskId) throw new Error('Assistant request origin unavailable')
+          const messages = await tx.doc(Messages, api.conversationId)
+          messages.generations ??= {}
+          messages.generations[api.taskId] = [...run.inputs]
+        }, ctx)
+      }
+    })
+  ]
+}
 
 export function createDelivery(
   chat: Chat,
@@ -15,6 +45,95 @@ export function createDelivery(
   authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>,
   authorizeProject?: (value: ProjectDisclosure, threadId: string, ctx: Context) => Promise<void>
 ) {
+  async function ready(harness: Harness, conversationId: ConversationId, input: { messageId: string; threadId: string }, ctx: Context) {
+    let wake = Promise.withResolvers<void>()
+    // Notifications only wake the scanner: do not call Session APIs from a commit listener.
+    const unsubscribe = harness.subscribeCommits(publication => {
+      if (publication.changes.some(change => (change.type === 'entry' || change.type === 'submission') && change.value.conversationId === conversationId))
+        wake.resolve()
+    })
+    const cancelled = () => wake.resolve()
+    ctx.abortSignal?.addEventListener('abort', cancelled)
+    try {
+      for (;;) {
+        wake = Promise.withResolvers<void>()
+        ctx.abortSignal?.throwIfAborted()
+        const { submission, posts } = await harness.commit(async tx => {
+          if ((await tx.doc(Threads)).threads[input.threadId] !== conversationId || (await tx.doc(Delegation, conversationId)).jobId !== undefined)
+            throw new Error('Only the originating chat coordinator can deliver assistant messages')
+          const submission = (await tx.submissionByRequest(conversationId, input.messageId))!
+          const messages = await tx.doc(Messages, conversationId)
+          const entries = []
+          if (submission.type === 'input' && submission.entry !== undefined) {
+            let cursor: Cursor | undefined
+            do {
+              const page = await tx.scanEntries(
+                { conversationId, minEntryId: submission.entry, ...(submission.status === 'done' ? { maxEntryId: submission.answer } : {}) },
+                256,
+                cursor
+              )
+              entries.push(...page.items)
+              cursor = page.next
+            } while (cursor !== undefined)
+          }
+          const scopes = await tx.doc(JobAnswerScopes, conversationId)
+          const disclosures = await tx.doc(ProjectDisclosures, conversationId)
+          // Finish table reads before creating any tasks (Tx disallows reads after writes).
+          const pending = []
+          const posts: TaskId<null>[] = []
+          for (const entry of entries.reverse()) {
+            if (entry.conversationId !== conversationId || !AssistantEntry.is(entry)) continue
+            const answer = entry.model?.[0] as AssistantMessage | undefined
+            if (!answer || !['stop', 'length', 'toolUse'].includes(answer.stopReason)) continue
+            const text = answer.content
+              .flatMap(part => (part.type === 'text' ? [part.text] : []))
+              .join('\n')
+              .trim()
+            if (!text || messages.lastAnswer === entry.id) continue
+            if (entry.byTaskId === undefined || (await tx.task(entry.byTaskId))?.kind !== 'pi.generation')
+              throw new Error('Assistant delivery origin unavailable')
+            const inputs = messages.generations?.[entry.byTaskId]
+            if (inputs === undefined) throw new Error('Assistant delivery input provenance unavailable')
+            // In particular, an unanswered old input must not claim a newer independent run.
+            if (!inputs.includes(submission.id)) continue
+            const receipt = messages.replies?.[entry.id]
+            if (receipt !== undefined) {
+              posts.push(receipt)
+              continue
+            }
+            const jobs = scopes.generations[entry.byTaskId]
+            const projects = disclosures.generations[entry.byTaskId]
+            if (jobs === undefined || projects === undefined) throw new Error('Assistant delivery authorization evidence unavailable')
+            pending.push({ entry: entry.id, text, jobs, projects })
+          }
+          for (const { entry, text, jobs, projects } of pending) {
+            const post = await tx.createTask(
+              Post,
+              { threadId: input.threadId, text, jobs, projects, previous: messages.lastPost },
+              // A shared answer belongs to the chat, not whichever coalesced Reply scanned it first.
+              { conversationId, ownership: { kind: 'conversation' } }
+            )
+            messages.replies ??= {}
+            messages.replies[entry] = post
+            messages.lastPost = post
+            posts.push(post)
+          }
+          return { submission, posts }
+        }, ctx)
+        if (submission.status === 'done' || submission.status === 'unanswered') {
+          // The settlement and final entry were scanned in one transaction, including after reopen.
+          const outcomes = await Promise.all(posts.map(post => harness.waitForTask(post, ctx)))
+          if (outcomes.some(post => post.state.outcome.status !== 'completed')) throw new Error('Chat delivery failed')
+          return submission
+        }
+        await wake.promise
+      }
+    } finally {
+      unsubscribe()
+      ctx.abortSignal?.removeEventListener('abort', cancelled)
+    }
+  }
+
   return defineTask<
     {
       threadId: string
@@ -87,8 +206,7 @@ export function createDelivery(
       },
       answer: async (task, runtime, ctx) => {
         using typing = task.input.internal ? undefined : showTyping(chat.thread(task.input.threadId))
-        const submission = (await getHarness().submission(task.state.checkpoint.submission, ctx))!
-        const settled = await submission.wait(ctx)
+        const settled = await ready(getHarness(), runtime.conversationId, task.input, ctx)
         if (settled.status === 'unanswered') {
           if (task.input.internal) {
             if (settled.reason !== 'aborted') console.error('[jobs] Internal update unanswered', settled)
@@ -128,7 +246,8 @@ export function createDelivery(
           if (settled.status === 'done' && settled.type === 'input') {
             const messages = await tx.doc(Messages, runtime.conversationId)
             // Several steers can share an answer. Deliver each distinct answer once, in order.
-            if (messages.lastAnswer === settled.answer) {
+            if (messages.lastAnswer === settled.answer || messages.replies?.[settled.answer] !== undefined) {
+              messages.lastAnswer = settled.answer
               return { status: 'terminal', outcome: { status: 'completed', result: null } }
             }
             const entry = await tx.entry(AssistantEntry, settled.answer)
@@ -189,11 +308,17 @@ export function createDelivery(
           return
         }
         await runtime.commit(async tx => {
+          const messages = await tx.doc(Messages, runtime.conversationId)
           const post = await tx.createTask(
             Post,
-            { threadId: task.input.threadId, text, job: task.input.job, jobs, projects },
+            { threadId: task.input.threadId, text, job: task.input.job, jobs, projects, previous: messages.lastPost },
             { ownership: { kind: 'task', taskId: task.id } }
           )
+          messages.lastPost = post
+          if (answer !== undefined) {
+            messages.replies ??= {}
+            messages.replies[answer] = post
+          }
           return {
             status: 'waiting',
             checkpoint: { phase: 'delivered', post, ...(answer === undefined ? {} : { answer }), ...(error ? { error } : {}) },
