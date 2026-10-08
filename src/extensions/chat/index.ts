@@ -20,6 +20,7 @@ import { BeeperCheckpoints } from 'extensions/chat/adapters/beeper/state'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 import { connectChat, prepareConversation, restoreChat } from 'extensions/chat/bridge'
 import { createDelivery } from 'extensions/chat/delivery'
+import { createMessageConsumer } from 'extensions/chat/consumer'
 import { createPost } from 'extensions/chat/post'
 import { listSources, threadFor, Messages } from 'extensions/chat/state'
 import type { ScheduleChat } from 'extensions/schedules'
@@ -90,7 +91,8 @@ export async function createChatIntegration(
     await checkJob(job, getHarness(), { check: checkDestination, checkScope }, ctx)
   }
   const Post = createPost(chat, authorizeBackground, authorizeProject)
-  const Reply = createDelivery(chat, getHarness, Post, authorizeBackground, authorizeProject)
+  const consumer = createMessageConsumer(Post)
+  const Reply = createDelivery(chat, getHarness, Post, consumer, authorizeBackground)
   const rename = defineTool({
     name: 'rename_thread',
     description:
@@ -142,22 +144,29 @@ export async function createChatIntegration(
     },
     media: (async (images, api, ctx) => {
       const threadId = await threadFor(api, api.conversationId, ctx)
-      const post = await api.createTask(
-        Post,
-        {
-          threadId,
-          text: '',
-          jobs: await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx),
-          projects: await currentDisclosures(api, api.conversationId, ctx),
-          files: images.map((image, index) => ({
-            data: image.data,
-            mimeType: image.mimeType,
-            filename: `generated-${index + 1}.${new MIMEType(image.mimeType).subtype.replace('svg+xml', 'svg')}`
-          }))
-        },
-        { ownership: { kind: 'conversation' } },
-        ctx
-      )
+      const jobs = await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
+      const projects = await currentDisclosures(api, api.conversationId, ctx)
+      const post = await api.commit(async tx => {
+        const messages = await tx.doc(Messages, api.conversationId)
+        const post = await tx.createTask(
+          Post,
+          {
+            threadId,
+            text: '',
+            jobs,
+            projects,
+            previous: messages.lastPost,
+            files: images.map((image, index) => ({
+              data: image.data,
+              mimeType: image.mimeType,
+              filename: `generated-${index + 1}.${new MIMEType(image.mimeType).subtype.replace('svg+xml', 'svg')}`
+            }))
+          },
+          { ownership: { kind: 'conversation' } }
+        )
+        messages.lastPost = post
+        return post
+      }, ctx)
       const task = await api.waitForTask(post, ctx)
       if (task.state.outcome.status !== 'completed') throw new Error('Generated images could not be delivered to chat.')
     }) satisfies MediaDelivery,
@@ -257,6 +266,7 @@ export async function createChatIntegration(
     webhooks: chat.webhooks,
     async restore(harness: Harness) {
       await chat.initialize()
+      await consumer.restore(harness)
       await restoreChat(chat, harness, agentFor)
     },
     async connect(onMessage?: Parameters<typeof connectChat>[5]) {
@@ -294,6 +304,7 @@ export async function createChatIntegration(
     close() {
       shutdown.abort()
       return (closing ??= (async () => {
+        await consumer.close()
         await chat.shutdown()
         await listening
       })())

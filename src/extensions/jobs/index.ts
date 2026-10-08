@@ -100,9 +100,10 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
         if (job.status !== 'running' && !(allowWaiting && job.status === 'waiting')) throw new Error(`Background task is ${job.status}`)
         await checkJob(job, getHarness(), chat, ctx)
       } else {
-        const ids = (await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)).filter(id => directory[id]?.projectScope?.length)
+        // Keep every supplied report origin, including project-free jobs, for output authorization.
+        const ids = await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
         for (const id of ids) await checkJob(directory[id]!, getHarness(), chat, ctx)
-        if (generation && ids.length)
+        if (generation)
           await getHarness().commit(async tx => {
             const scope = await tx.doc(JobAnswerScopes, api.conversationId)
             scope.generations[api.taskId] = [...new Set([...(scope.generations[api.taskId] ?? []), ...ids])]

@@ -57,10 +57,10 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness) {
       hooks: [
         hook(GenerationTask, {
           beforeRequest: async (_request, api, ctx) => {
-            await access.guard(api, ctx)
+            await access.guard(api, ctx, true)
             return undefined
           },
-          afterResponse: (_message, api, ctx) => access.guard(api, ctx)
+          afterResponse: (_message, api, ctx) => access.guard(api, ctx, true)
         }),
         hook(ToolTask, {
           beforeTool: async (_call, api, ctx) => {

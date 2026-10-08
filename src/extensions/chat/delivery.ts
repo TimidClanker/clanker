@@ -1,19 +1,19 @@
-import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai'
-import { AssistantEntry, defineTask, InboxDoc, LiveDoc, type Harness, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
+import type { ImageContent } from '@earendil-works/pi-ai'
+import { defineTask, InboxDoc, LiveDoc, type Harness, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord'
 import type { Chat } from 'chat'
-import { ProjectDisclosures, type ProjectDisclosure } from 'extensions/projects/state'
-import { JobAnswerScopes } from 'extensions/jobs/state'
+import type { ProjectDisclosure } from 'extensions/projects/state'
 import { Messages } from 'extensions/chat/state'
 import { showTyping } from 'extensions/chat/typing'
 import type { createPost } from 'extensions/chat/post'
+import type { createMessageConsumer } from 'extensions/chat/consumer'
 
 export function createDelivery(
   chat: Chat,
   getHarness: () => Harness,
   Post: ReturnType<typeof createPost>,
-  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>,
-  authorizeProject?: (value: ProjectDisclosure, threadId: string, ctx: Context) => Promise<void>
+  consumer: ReturnType<typeof createMessageConsumer>,
+  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>
 ) {
   return defineTask<
     {
@@ -61,6 +61,7 @@ export function createDelivery(
             return
           }
         }
+        await consumer.attach(getHarness(), runtime.conversationId, task.input.threadId)
         // Admit input before waiting for earlier replies, so it can steer an active run.
         const conversation = (await runtime.conversation(runtime.conversationId, ctx))!
         const submission = await conversation.submit(
@@ -74,7 +75,7 @@ export function createDelivery(
         )
         // Close the race with cancellation during admission. Already-placed input must still get its response.
         if (schedule !== undefined && (await getHarness().getTask(schedule, ctx))!.abortRequested) await submission.abort(ctx)
-        // Only delivery is serialized. requestId makes admission safe to repeat after a restart.
+        // Settlement/error handling is serialized, not admission or completed-message delivery.
         await runtime.commit(
           () => ({
             status: 'waiting',
@@ -87,8 +88,14 @@ export function createDelivery(
       },
       answer: async (task, runtime, ctx) => {
         using typing = task.input.internal ? undefined : showTyping(chat.thread(task.input.threadId))
-        const submission = (await getHarness().submission(task.state.checkpoint.submission, ctx))!
-        const settled = await submission.wait(ctx)
+        const harness = getHarness()
+        const settled = await (await harness.submission(task.state.checkpoint.submission, ctx))!.wait(ctx)
+        if (settled.status === 'done') {
+          if (settled.type !== 'input') throw new Error('Reply submission is not an input')
+          await (await consumer.attach(harness, runtime.conversationId, task.input.threadId)).through(settled.answer, ctx)
+          await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), ctx)
+          return
+        }
         if (settled.status === 'unanswered') {
           if (task.input.internal) {
             if (settled.reason !== 'aborted') console.error('[jobs] Internal update unanswered', settled)
@@ -121,43 +128,6 @@ export function createDelivery(
           }, ctx)
           return
         }
-        await runtime.commit(async tx => {
-          let text = 'Sorry, I could not generate a response. Please try again.'
-          let jobs: TaskId[] | undefined
-          let projects: ProjectDisclosure[] | undefined
-          if (settled.status === 'done' && settled.type === 'input') {
-            const messages = await tx.doc(Messages, runtime.conversationId)
-            // Several steers can share an answer. Deliver each distinct answer once, in order.
-            if (messages.lastAnswer === settled.answer) {
-              return { status: 'terminal', outcome: { status: 'completed', result: null } }
-            }
-            const entry = await tx.entry(AssistantEntry, settled.answer)
-            if (entry?.byTaskId !== undefined) {
-              jobs = (await tx.doc(JobAnswerScopes, runtime.conversationId)).generations[entry.byTaskId]
-              projects = (await tx.doc(ProjectDisclosures, runtime.conversationId)).generations[entry.byTaskId]
-            }
-            const answer = entry!.model![0] as AssistantMessage
-            text = answer.content
-              .flatMap(part => (part.type === 'text' ? [part.text] : []))
-              .join('\n')
-              .trim()
-            // A successful turn may have delivered its response through a tool, such as an image upload.
-            if (!text) {
-              messages.lastAnswer = settled.answer
-              return { status: 'terminal', outcome: { status: 'completed', result: null } }
-            }
-          }
-          return {
-            status: 'running',
-            checkpoint: {
-              phase: 'send',
-              text,
-              ...(jobs?.length ? { jobs } : {}),
-              ...(projects?.length ? { projects } : {}),
-              ...(settled.status === 'done' && settled.type === 'input' ? { answer: settled.answer } : {})
-            }
-          }
-        }, ctx)
       },
       withdraw: async (task, runtime, ctx) => {
         for (const id of task.state.checkpoint.submissions) {
@@ -175,25 +145,24 @@ export function createDelivery(
           ctx
         )
       },
+      // New sends are error fallbacks; retain answer/envelope fields for stored version-1 checkpoints.
       send: async (task, runtime, ctx) => {
         const { text, answer, error, jobs, projects } = task.state.checkpoint
-        try {
-          for (const value of projects ?? []) {
-            if (!authorizeProject) throw new Error('Project delivery authorization unavailable')
-            await authorizeProject(value, task.input.threadId, ctx)
-          }
-        } catch (cause) {
-          ctx.abortSignal?.throwIfAborted()
-          const message = cause instanceof Error ? cause.message : String(cause)
-          await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'failed', error: { message } } }), ctx)
-          return
-        }
         await runtime.commit(async tx => {
-          const post = await tx.createTask(
-            Post,
-            { threadId: task.input.threadId, text, job: task.input.job, jobs, projects },
-            { ownership: { kind: 'task', taskId: task.id } }
-          )
+          const messages = await tx.doc(Messages, runtime.conversationId)
+          const existing = answer === undefined ? undefined : messages.replies?.[answer]
+          const post =
+            existing ??
+            (await tx.createTask(
+              Post,
+              { threadId: task.input.threadId, text, job: task.input.job, jobs, projects, previous: messages.lastPost },
+              { ownership: { kind: 'task', taskId: task.id } }
+            ))
+          if (existing === undefined) messages.lastPost = post
+          if (answer !== undefined) {
+            messages.replies ??= {}
+            messages.replies[answer] = post
+          }
           return {
             status: 'waiting',
             checkpoint: { phase: 'delivered', post, ...(answer === undefined ? {} : { answer }), ...(error ? { error } : {}) },

@@ -20,7 +20,16 @@ export async function threadFor(read: DocumentReader, conversationId: Conversati
   return source.threadId
 }
 
-export const Messages = defineDoc<{ received: Record<string, TaskId>; lastTask: TaskId | null; lastAnswer?: EntryId }>({
+export const Messages = defineDoc<{
+  received: Record<string, TaskId>
+  lastTask: TaskId | null
+  lastAnswer?: EntryId
+  // Entry receipts and the post-only delivery chain survive replay and coalesced steers.
+  replies?: Record<string, TaskId<null>>
+  lastPost?: TaskId<null>
+  // Highest committed entry examined by the conversation-owned message consumer.
+  cursor?: EntryId
+}>({
   kind: 'clanker.messages',
   version: 1,
   scope: 'conversation',
