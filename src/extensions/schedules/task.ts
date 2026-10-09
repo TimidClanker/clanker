@@ -1,21 +1,10 @@
-import type { Context } from '@earendil-works/chord'
-import { defineTask, type DocumentReader, type ConversationId, type Harness, type TaskId, type Tx } from '@earendil-works/pi-durable'
-import type { Author, PlatformAccount } from 'extensions/identity'
+import { defineTask, type ConversationId, type Harness, type TaskId } from '@earendil-works/pi-durable'
+import type { ChatAccess, ChatDelivery, ChatDestinations, Destination } from 'extensions/chat/contracts'
+import type { PlatformAccount } from 'extensions/identity'
 import { nextOccurrence, type Timing } from 'extensions/schedules/time'
 
-export type Destination = { threadId: string; title: string }
-export type ScheduleChat = {
-  privateIdentity(read: DocumentReader, conversationId: ConversationId, ctx: Context): Promise<string | undefined>
-  resolve(source: ConversationId, account: PlatformAccount, reference: string | undefined, ctx: Context): Promise<Destination>
-  // Use the transaction reader when checking on a durable commit line.
-  check(destination: Destination, account: PlatformAccount, ctx: Context, read?: DocumentReader): Promise<void>
-  prepare(tx: Tx, destination: Destination): Promise<ConversationId>
-  enqueue(
-    tx: Tx,
-    conversationId: ConversationId,
-    event: { schedule?: TaskId; requestId: string; text: string; owner: Author; threadId: string; internal?: boolean; job?: TaskId }
-  ): Promise<TaskId<null>>
-}
+export type { Destination } from 'extensions/chat/contracts'
+export type ScheduleChat = Pick<ChatAccess, 'privateIdentity' | 'check'> & ChatDelivery & ChatDestinations
 export type ScheduleInput = {
   sourceConversationId: ConversationId
   destination: Destination

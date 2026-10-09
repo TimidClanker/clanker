@@ -2,10 +2,10 @@ import type { ImageContent } from '@earendil-works/pi-ai'
 import { defineTask, InboxDoc, LiveDoc, type Harness, type EntryId, type SubmissionId, type TaskId } from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord'
 import type { Chat } from 'chat'
-import type { ProjectDisclosure } from 'extensions/projects/state'
+import type { ProjectDisclosure } from 'extensions/projects'
 import { Messages } from 'extensions/chat/state'
 import { showTyping } from 'extensions/chat/typing'
-import type { createPost } from 'extensions/chat/post'
+import { createPostQueue, type createPost } from 'extensions/chat/post'
 import type { createMessageConsumer } from 'extensions/chat/consumer'
 
 export function createDelivery(
@@ -13,8 +13,9 @@ export function createDelivery(
   getHarness: () => Harness,
   Post: ReturnType<typeof createPost>,
   consumer: ReturnType<typeof createMessageConsumer>,
-  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>
+  authorize: (job: TaskId, threadId: string, ctx: Context) => Promise<void>
 ) {
+  const enqueuePost = createPostQueue(Post)
   return defineTask<
     {
       threadId: string
@@ -51,7 +52,7 @@ export function createDelivery(
             return
           }
         }
-        if (task.input.job !== undefined && authorize) {
+        if (task.input.job !== undefined) {
           try {
             await authorize(task.input.job, task.input.threadId, ctx)
           } catch (error) {
@@ -153,12 +154,12 @@ export function createDelivery(
           const existing = answer === undefined ? undefined : messages.replies?.[answer]
           const post =
             existing ??
-            (await tx.createTask(
-              Post,
-              { threadId: task.input.threadId, text, job: task.input.job, jobs, projects, previous: messages.lastPost },
+            (await enqueuePost(
+              tx,
+              runtime.conversationId,
+              { threadId: task.input.threadId, text, job: task.input.job, jobs, projects },
               { ownership: { kind: 'task', taskId: task.id } }
             ))
-          if (existing === undefined) messages.lastPost = post
           if (answer !== undefined) {
             messages.replies ??= {}
             messages.replies[answer] = post

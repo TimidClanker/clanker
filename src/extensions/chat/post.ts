@@ -1,13 +1,23 @@
 import type { Context } from '@earendil-works/chord'
-import { defineTask, type TaskId } from '@earendil-works/pi-durable'
+import { defineTask, type ConversationId, type TaskId, type TaskOptions, type Tx } from '@earendil-works/pi-durable'
 import type { Chat } from 'chat'
-import type { ProjectDisclosure } from 'extensions/projects/state'
+import type { ProjectDisclosure } from 'extensions/projects'
 import { platformFor } from 'extensions/chat/adapters'
+import { Messages } from 'extensions/chat/state'
+
+export const createPostQueue =
+  (Post: ReturnType<typeof createPost>) =>
+  async (tx: Tx, conversationId: ConversationId, input: Omit<Parameters<typeof Post.definition.initial>[0], 'previous'>, options: TaskOptions) => {
+    const messages = await tx.doc(Messages, conversationId)
+    const post = await tx.createTask(Post, { ...input, previous: messages.lastPost }, options)
+    messages.lastPost = post
+    return post
+  }
 
 export function createPost(
   chat: Chat,
-  authorize?: (job: TaskId, threadId: string, ctx: Context) => Promise<void>,
-  authorizeProject?: (value: ProjectDisclosure, threadId: string, ctx: Context) => Promise<void>
+  authorize: (job: TaskId, threadId: string, ctx: Context) => Promise<void>,
+  authorizeProject: (value: ProjectDisclosure, threadId: string, ctx: Context) => Promise<void>
 ) {
   return defineTask<
     {
@@ -40,7 +50,6 @@ export function createPost(
         const { text, attempt = 0, retryAt } = task.state.checkpoint
         if (retryAt !== undefined) await runtime.sleep(retryAt, ctx)
         for (const job of new Set([...(task.input.jobs ?? []), ...(task.input.job === undefined ? [] : [task.input.job])])) {
-          if (!authorize) throw new Error('Background post authorization unavailable')
           try {
             await authorize(job, task.input.threadId, ctx)
           } catch (error) {
@@ -52,7 +61,6 @@ export function createPost(
           }
         }
         for (const value of task.input.projects ?? []) {
-          if (!authorizeProject) throw new Error('Project post authorization unavailable')
           try {
             await authorizeProject(value, task.input.threadId, ctx)
           } catch (error) {

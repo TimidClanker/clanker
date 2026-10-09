@@ -4,26 +4,27 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import { Chat } from 'chat'
 import { createTransportState } from 'extensions/chat/transport-state'
 import { Type } from '@earendil-works/pi-ai'
-import { defineExtension, defineTool, section, type DocumentReader, type Harness, type TaskId } from '@earendil-works/pi-durable'
+import { defineExtension, defineTool, section, type DocumentReader, type Harness } from '@earendil-works/pi-durable'
 import type { selectModel } from 'model'
-import { findIdentity, sourceConversation, recordAutomatedInput, recordMessageAuthor, type IdentityAccess } from 'extensions/identity'
-import { currentDisclosures } from 'extensions/projects/access'
-import type { ProjectDisclosure } from 'extensions/projects/state'
-import { Jobs } from 'extensions/jobs/state'
-import { checkJob, type JobChat } from 'extensions/jobs/task'
-import { accountKey, getBackgroundInputJobs } from 'extensions/identity/state'
-import { createAccountLinking, isAccountLinkCommand } from 'extensions/identity/accounts'
-import { Discord } from 'extensions/chat/adapters/discord'
-import { Beeper } from 'extensions/chat/adapters/beeper'
-import { beeperConfig } from 'extensions/chat/adapters/beeper/config'
-import { BeeperCheckpoints } from 'extensions/chat/adapters/beeper/state'
+import {
+  findIdentity,
+  sourceConversation,
+  recordAutomatedInput,
+  recordMessageAuthor,
+  accountKey,
+  getBackgroundInputJobs,
+  isAccountLinkCommand,
+  type IdentityAccess,
+  type createIdentity
+} from 'extensions/identity'
+import { currentDisclosures } from 'extensions/projects'
 import { platformFor, type PlatformAdapter } from 'extensions/chat/adapters'
 import { connectChat, prepareConversation, restoreChat } from 'extensions/chat/bridge'
 import { createDelivery } from 'extensions/chat/delivery'
 import { createMessageConsumer } from 'extensions/chat/consumer'
-import { createPost } from 'extensions/chat/post'
+import { createPost, createPostQueue } from 'extensions/chat/post'
 import { listSources, threadFor, Messages } from 'extensions/chat/state'
-import type { ScheduleChat } from 'extensions/schedules'
+import type { ChatAccess, ChatDelivery, ChatDestinations } from 'extensions/chat/contracts'
 import type { SandboxAccess } from 'extensions/sandbox'
 import type { MediaDelivery } from 'extensions/media-gen'
 
@@ -31,34 +32,13 @@ export async function createChatIntegration(
   selection: ReturnType<typeof selectModel>,
   getHarness: () => Harness,
   useAgent: <T>(work: (harness: Harness) => Promise<T>) => Promise<T>,
-  adapters?: Record<string, PlatformAdapter>
-) {
-  if (!adapters) {
-    const config = await beeperConfig()
-    adapters = {
-      discord: new Discord(),
-      ...(config.accessToken && config.accountIDs.length
-        ? {
-            beeper: new Beeper(config, {
-              load: scope =>
-                useAgent(harness =>
-                  harness.commit(async tx => {
-                    const checkpoints = await tx.doc(BeeperCheckpoints)
-                    const now = Date.now()
-                    return { ...(checkpoints[scope] ??= { since: now, syncedAt: now }) }
-                  }, BACKGROUND_CONTEXT)
-                ),
-              save: (scope, checkpoint) =>
-                useAgent(harness =>
-                  harness.commit(async tx => {
-                    ;(await tx.doc(BeeperCheckpoints))[scope] = checkpoint
-                  }, BACKGROUND_CONTEXT)
-                )
-            })
-          }
-        : {})
-    }
+  adapters: Record<string, PlatformAdapter>,
+  policy: {
+    authorizeJob: Parameters<typeof createPost>[1]
+    authorizeProject: Parameters<typeof createPost>[2]
+    handleAccountLink: ReturnType<typeof createIdentity>['accounts']['handle']
   }
+) {
   const chat = new Chat({
     userName: 'clanker',
     adapters,
@@ -69,7 +49,7 @@ export async function createChatIntegration(
   const shutdown = new AbortController()
   let listening: Promise<unknown> = Promise.resolve()
   let closing: Promise<void> | undefined
-  const checkDestination: ScheduleChat['check'] = async (destination, account, ctx, read = getHarness()) => {
+  const checkDestination: ChatAccess['check'] = async (destination, account, ctx, read = getHarness()) => {
     const platform = platformFor(chat, destination.threadId)
     if (!platform.resolveDestination) throw new Error('This platform cannot verify scheduled task destinations')
     const peer = await platform.privateRecipient?.(destination.threadId)
@@ -78,21 +58,21 @@ export async function createChatIntegration(
     await platform.resolveDestination(destination.threadId, linked ? peer : account, destination.threadId)
     await chat.thread(destination.threadId).subscribe()
   }
-  let checkScope: JobChat['checkScope']
-  let supplyJobs: JobChat['supplyJobs']
-  let checkDisclosure: ((value: ProjectDisclosure, threadId: string | undefined, ctx: Context) => Promise<void>) | undefined
-  const authorizeProject = async (value: ProjectDisclosure, threadId: string, ctx: Context) => {
-    if (!checkDisclosure) throw new Error('Project access verification is unavailable')
-    await checkDisclosure(value, threadId, ctx)
+  const Post = createPost(chat, policy.authorizeJob, policy.authorizeProject)
+  const enqueuePost = createPostQueue(Post)
+  const enqueue: ChatDelivery['enqueue'] = async (tx, conversationId, { schedule, requestId, text, owner, threadId, internal, job }) => {
+    await recordAutomatedInput(tx, conversationId, requestId, owner, schedule === undefined ? 'background' : 'schedule', job)
+    const messages = await tx.doc(Messages, conversationId)
+    const reply = await tx.createTask(
+      Reply,
+      { threadId, messageId: requestId, text, previous: messages.lastTask, schedule, internal, job },
+      { conversationId, ownership: { kind: 'conversation' }, background: true }
+    )
+    messages.lastTask = reply
+    return reply
   }
-  const authorizeBackground = async (id: TaskId, threadId: string, ctx: Context) => {
-    const job = (await getHarness().snapshot(Jobs, ctx))!.jobs[id]!
-    if (job.threadId !== threadId) throw new Error('Background update destination changed')
-    await checkJob(job, getHarness(), { check: checkDestination, checkScope }, ctx)
-  }
-  const Post = createPost(chat, authorizeBackground, authorizeProject)
-  const consumer = createMessageConsumer(Post)
-  const Reply = createDelivery(chat, getHarness, Post, consumer, authorizeBackground)
+  const consumer = createMessageConsumer(enqueuePost, enqueue)
+  const Reply = createDelivery(chat, getHarness, Post, consumer, policy.authorizeJob)
   const rename = defineTool({
     name: 'rename_thread',
     description:
@@ -130,43 +110,41 @@ export async function createChatIntegration(
       await chat.thread(threadId).post(text)
     }
   }
-  const accountLinks = createAccountLinking(identityAccess, getHarness)
+  const access: ChatAccess = {
+    async privateIdentity(read, conversationId, ctx) {
+      const account = await identityAccess.privateAccount(read, conversationId, ctx)
+      return account ? await findIdentity(read, account, ctx) : undefined
+    },
+    check: checkDestination,
+    threadFor
+  }
 
   return {
-    setProjectAccess(access: {
-      checkScope: NonNullable<JobChat['checkScope']>
-      checkDisclosure: NonNullable<typeof checkDisclosure>
-      supplyJobs: NonNullable<JobChat['supplyJobs']>
-    }) {
-      checkScope = access.checkScope
-      checkDisclosure = access.checkDisclosure
-      supplyJobs = access.supplyJobs
-    },
+    access,
     media: (async (images, api, ctx) => {
       const threadId = await threadFor(api, api.conversationId, ctx)
       const jobs = await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
       const projects = await currentDisclosures(api, api.conversationId, ctx)
-      const post = await api.commit(async tx => {
-        const messages = await tx.doc(Messages, api.conversationId)
-        const post = await tx.createTask(
-          Post,
-          {
-            threadId,
-            text: '',
-            jobs,
-            projects,
-            previous: messages.lastPost,
-            files: images.map((image, index) => ({
-              data: image.data,
-              mimeType: image.mimeType,
-              filename: `generated-${index + 1}.${new MIMEType(image.mimeType).subtype.replace('svg+xml', 'svg')}`
-            }))
-          },
-          { ownership: { kind: 'conversation' } }
-        )
-        messages.lastPost = post
-        return post
-      }, ctx)
+      const post = await api.commit(
+        tx =>
+          enqueuePost(
+            tx,
+            api.conversationId,
+            {
+              threadId,
+              text: '',
+              jobs,
+              projects,
+              files: images.map((image, index) => ({
+                data: image.data,
+                mimeType: image.mimeType,
+                filename: `generated-${index + 1}.${new MIMEType(image.mimeType).subtype.replace('svg+xml', 'svg')}`
+              }))
+            },
+            { conversationId: api.conversationId, ownership: { kind: 'conversation' } }
+          ),
+        ctx
+      )
       const task = await api.waitForTask(post, ctx)
       if (task.state.outcome.status !== 'completed') throw new Error('Generated images could not be delivered to chat.')
     }) satisfies MediaDelivery,
@@ -177,12 +155,9 @@ export async function createChatIntegration(
         if (!platform.sandboxAudience) throw new Error('This platform cannot verify sandbox membership')
         return platform.sandboxAudience(threadId, accounts)
       }
-    } satisfies SandboxAccess,
-    schedules: {
-      async privateIdentity(read, conversationId, ctx) {
-        const account = await identityAccess.privateAccount(read, conversationId, ctx)
-        return account ? await findIdentity(read, account, ctx) : undefined
-      },
+    } satisfies Pick<SandboxAccess, 'audience'>,
+    delivery: {
+      ...access,
       async resolve(source, account, reference, ctx) {
         const threadId = await threadFor(getHarness(), source, ctx)
         if (reference) {
@@ -206,33 +181,10 @@ export async function createChatIntegration(
         if (!platform.resolveDestination) throw new Error('This platform does not support directing tasks to other channels')
         return platform.resolveDestination(threadId, account, reference ?? threadId)
       },
-      check: checkDestination,
-      checkScope: async (job, ctx, tx) => {
-        if (job.projectScope?.length && !checkScope) throw new Error('Project access verification is unavailable')
-        await checkScope?.(job, ctx, tx)
-      },
-      supplyJobs: async (jobs, api, ctx) => {
-        if (jobs.some(job => job.projectScope?.length) && !supplyJobs) throw new Error('Project disclosure verification is unavailable')
-        await supplyJobs?.(jobs, api, ctx)
-      },
       prepare: (tx, destination) => prepareConversation(tx, destination.threadId, agentFor(destination.threadId)),
-      async enqueue(tx, conversationId, { schedule, requestId, text, owner, threadId, internal, job }) {
-        await recordAutomatedInput(tx, conversationId, requestId, owner, schedule === undefined ? 'background' : 'schedule', job)
-        const messages = await tx.doc(Messages, conversationId)
-        const reply = await tx.createTask(
-          Reply,
-          { threadId, messageId: requestId, text, previous: messages.lastTask, schedule, internal, job },
-          {
-            conversationId,
-            ownership: { kind: 'conversation' },
-            background: true
-          }
-        )
-        messages.lastTask = reply
-        return reply
-      }
-    } satisfies ScheduleChat & JobChat,
-    identity: { ...identityAccess, accounts: accountLinks },
+      enqueue
+    } satisfies ChatAccess & ChatDelivery & ChatDestinations,
+    identity: identityAccess,
     extension: defineExtension({
       // Keep the stored selection name stable while moving its implementation.
       name: 'clanker',
@@ -285,7 +237,7 @@ export async function createChatIntegration(
             await harness.commit(async tx => {
               const conversationId = await prepareConversation(tx, thread.id, agentFor(thread.id))
               const author = await recordMessageAuthor(tx, conversationId, message.id, sender, message.author.fullName || message.author.userName)
-              await accountLinks.handle(tx, { ...author, conversationId }, message.id, message.text)
+              await policy.handleAccountLink(tx, { ...author, conversationId }, message.id, message.text)
             }, BACKGROUND_CONTEXT)
             harness.resume()
           })

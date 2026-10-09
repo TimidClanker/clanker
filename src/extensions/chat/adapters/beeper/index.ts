@@ -1,4 +1,5 @@
 import BeeperDesktop from '@beeper/desktop-api'
+import { AccessDenied } from 'access'
 import {
   BaseFormatConverter,
   EmojiResolver,
@@ -61,7 +62,7 @@ export class Beeper implements PlatformAdapter {
   decodeThreadId(threadId: string) {
     if (!threadId.startsWith('beeper:')) throw new Error('Invalid Beeper thread ID')
     const [accountID, chatID] = JSON.parse(Buffer.from(threadId.slice(7), 'base64url').toString()) as [string, string]
-    if (!this.config.accountIDs.includes(accountID)) throw new Error('This Beeper account is not enabled for Clanker')
+    if (!this.config.accountIDs.includes(accountID)) throw new AccessDenied('This Beeper account is not enabled for Clanker')
     return { accountID, chatID }
   }
 
@@ -80,7 +81,7 @@ export class Beeper implements PlatformAdapter {
 
   async accountLabel(threadId: string, account: PlatformAccount) {
     const chat = await this.conversation(threadId)
-    if (account.platform !== this.name || account.scope !== chat.accountID) throw new Error('Account does not belong to this Beeper conversation')
+    if (account.platform !== this.name || account.scope !== chat.accountID) throw new AccessDenied('Account does not belong to this Beeper conversation')
     const user = chat.participants.items.find(user => user.id === account.userId)
     const handle = user?.phoneNumber || user?.username || user?.email
     let network = this.networks.get(chat.accountID)
@@ -98,8 +99,14 @@ export class Beeper implements PlatformAdapter {
 
   private async conversation(threadId: string, fresh = false) {
     const { accountID, chatID } = this.decodeThreadId(threadId)
-    const chat = (!fresh && this.chats.get(chatID)) || (await this.client.chats.retrieve(chatID, { maxParticipantCount: -1 }))
-    if (chat.accountID !== accountID) throw new Error('Beeper chat does not belong to the selected account')
+    const chat =
+      (!fresh && this.chats.get(chatID)) ||
+      (await this.client.chats.retrieve(chatID, { maxParticipantCount: -1 }).catch(error => {
+        if (error instanceof BeeperDesktop.PermissionDeniedError || error instanceof BeeperDesktop.NotFoundError)
+          throw new AccessDenied('Beeper conversation is missing or inaccessible', { cause: error })
+        throw error
+      }))
+    if (chat.accountID !== accountID) throw new AccessDenied('Beeper chat does not belong to the selected account')
     if (chat.merge) throw new Error('Use an individual network conversation, not a merged Beeper chat')
     this.chats.set(chatID, chat)
     return chat
@@ -125,7 +132,7 @@ export class Beeper implements PlatformAdapter {
       account.scope !== chat.accountID ||
       !chat.participants.items.some(user => user.id === account.userId && !user.isPending)
     )
-      throw new Error('The sender is not a member of that Beeper conversation')
+      throw new AccessDenied('The sender is not a member of that Beeper conversation')
     return { threadId: this.encodeThreadId({ accountID: chat.accountID, chatID: chat.id }), title: chat.title }
   }
 

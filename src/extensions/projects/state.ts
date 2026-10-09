@@ -1,10 +1,10 @@
 import { defineDoc, type ConversationId, type TaskId } from '@earendil-works/pi-durable'
 
 import type { Author } from 'extensions/identity'
+import type { ProjectScope } from 'extensions/projects/schema'
 
-export type ProjectScope = { projectId: string; workItemIds?: string[] }[]
 export type Role = 'admin' | 'editor' | 'reader'
-type Provenance = { actor: string; conversationId: ConversationId; jobId?: number; createdAt: string; updatedAt: string; revision: number }
+export type Provenance = { actor: string; conversationId: ConversationId; jobId?: number; createdAt: string; updatedAt: string; revision: number }
 export type Knowledge = Provenance & { text: string; kind: 'fact' | 'decision' | 'proposal'; source?: string }
 export type WorkItem = Provenance & {
   goal: string

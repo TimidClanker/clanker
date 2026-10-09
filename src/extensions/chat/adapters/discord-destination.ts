@@ -1,4 +1,5 @@
 import type { PlatformAccount } from 'extensions/identity'
+import { AccessDenied } from 'access'
 
 type Channel = {
   id: string
@@ -19,7 +20,7 @@ export async function discordDestination(
   reference: string,
   botId: string
 ) {
-  if (account.platform !== 'discord' || account.scope !== 'global') throw new Error('A verified Discord account is required')
+  if (account.platform !== 'discord' || account.scope !== 'global') throw new AccessDenied('A verified Discord account is required')
   const value = reference.trim()
   const id =
     /^(?:<#)?(\d+)>?$/.exec(value)?.[1] ??
@@ -35,7 +36,7 @@ export async function discordDestination(
     channel = matches[0]!
   }
   if ([1, 3].includes(channel.type)) {
-    if (!channel.recipients?.some(recipient => recipient.id === account.userId)) throw new Error('The requester is not a recipient of this DM')
+    if (!channel.recipients?.some(recipient => recipient.id === account.userId)) throw new AccessDenied('The requester is not a recipient of this DM')
     return { guildId: '@me', channelId: channel.id, title: channel.name ?? 'Direct message' }
   }
   if (![0, 5, 10, 11, 12].includes(channel.type) || !channel.guild_id) throw new Error('Choose a text channel or a thread, not a forum or category')
@@ -68,11 +69,11 @@ export async function discordDestination(
     }
     const required = (1n << 10n) | (1n << 16n) | (1n << (thread ? 38n : 11n))
     if ((permissions & required) !== required || Date.parse(member.communication_disabled_until ?? '') > Date.now()) {
-      throw new Error('Both the requester and the bot need permission to view, read history, and send in the destination')
+      throw new AccessDenied('Both the requester and the bot need permission to view, read history, and send in the destination')
     }
     const manageThreads = (permissions & (1n << 34n)) !== 0n
     if (channel.type === 12 && !manageThreads) await api(`/channels/${channel.id}/thread-members/${userId}`)
-    if (channel.thread_metadata?.archived && channel.thread_metadata.locked && !manageThreads) throw new Error('The destination thread is locked')
+    if (channel.thread_metadata?.archived && channel.thread_metadata.locked && !manageThreads) throw new AccessDenied('The destination thread is locked')
   }
   return {
     guildId,

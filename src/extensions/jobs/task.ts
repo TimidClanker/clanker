@@ -2,35 +2,39 @@ import type { Context } from '@earendil-works/chord'
 import type { AssistantMessage } from '@earendil-works/pi-ai'
 import { AssistantEntry, defineTask, type EntryId, type Harness, type TaskId, type Tx, type ToolExecutionApi } from '@earendil-works/pi-durable'
 import { findIdentity, recordAutomatedInput, resolveIdentity } from 'extensions/identity'
-import type { ScheduleChat } from 'extensions/schedules'
+import type { ChatAccess } from 'extensions/chat/contracts'
 import { JobInputs, Jobs, type Job } from 'extensions/jobs/state'
+import { JobReported } from 'extensions/jobs/events'
 
-export type JobChat = Pick<ScheduleChat, 'privateIdentity' | 'check' | 'enqueue'> & {
-  checkScope?(job: Job, ctx: Context, tx?: Tx): Promise<void>
-  supplyJobs?(jobs: Job[], api: ToolExecutionApi, ctx: Context): Promise<void>
+export type JobAccess = ChatAccess & {
+  checkScope(job: Job, ctx: Context, tx?: Tx): Promise<void>
+  supplyJobs(jobs: Job[], api: ToolExecutionApi, ctx: Context): Promise<void>
 }
 
-export async function checkJob(job: Job, harness: Harness, chat: Pick<JobChat, 'check' | 'checkScope'>, ctx: Context) {
+export async function checkJob(job: Job, harness: Harness, chat: Pick<JobAccess, 'check' | 'checkScope'>, ctx: Context) {
   if ((await findIdentity(harness, job.owner.account, ctx)) !== (await resolveIdentity(harness, job.owner.identityId, ctx))) {
     throw new Error('The account that delegated this task no longer belongs to its owner')
   }
   await chat.check({ threadId: job.threadId, title: job.title }, job.owner.account, ctx)
-  if (job.projectScope?.length && !chat.checkScope) throw new Error('Project access verification is unavailable')
-  await chat.checkScope?.(job, ctx)
+  await chat.checkScope(job, ctx)
 }
 
-export async function notifyJob(tx: Tx, chat: JobChat, job: Job, requestId: string, kind: string, text: string) {
-  await chat.enqueue(tx, job.sourceConversationId, {
-    requestId,
-    threadId: job.threadId,
-    owner: job.owner,
-    internal: true,
-    job: job.id,
-    text: `[Background task update]\n${JSON.stringify({ id: job.id, title: job.title, revision: job.revision, kind, text })}`
+export async function notifyJob(tx: Tx, job: Job, requestId: string, kind: string, text: string) {
+  await tx.appendEntry(JobReported, job.sourceConversationId, {
+    data: {
+      requestId,
+      jobId: job.id,
+      threadId: job.threadId,
+      owner: job.owner,
+      title: job.title,
+      revision: job.revision,
+      kind,
+      text
+    }
   })
 }
 
-export function createJobTasks(chat: JobChat, getHarness: () => Harness) {
+export function createJobTasks(chat: JobAccess, getHarness: () => Harness) {
   // A permanent background ownership boundary, independent of the spawning tool's lifetime.
   const Anchor = defineTask<null, { phase: 'done' }, null>({
     name: 'jobs.anchor',
@@ -103,12 +107,12 @@ export function createJobTasks(chat: JobChat, getHarness: () => Harness) {
             current.updatedAt = new Date(runtime.now()).toISOString()
             if (
               permitted &&
-              (await (chat.checkScope?.(current, ctx, tx).then(
+              (await chat.checkScope(current, ctx, tx).then(
                 () => true,
                 () => false
-              ) ?? true))
+              ))
             )
-              await notifyJob(tx, chat, current, `job-result:${task.id}`, current.status, current.result)
+              await notifyJob(tx, current, `job-result:${task.id}`, current.status, current.result)
           }
           return { status: 'terminal', outcome: { status: 'completed', result: null } }
         }, ctx)
@@ -135,12 +139,12 @@ export function createJobTasks(chat: JobChat, getHarness: () => Harness) {
           current.updatedAt = new Date(runtime.now()).toISOString()
           if (
             permitted &&
-            (await (chat.checkScope?.(current, ctx, tx).then(
+            (await chat.checkScope(current, ctx, tx).then(
               () => true,
               () => false
-            ) ?? true))
+            ))
           )
-            await notifyJob(tx, chat, current, `job-cancelled:${task.id}`, 'cancelled', 'Execution stopped. Completed external actions are not rolled back.')
+            await notifyJob(tx, current, `job-cancelled:${task.id}`, 'cancelled', 'Execution stopped. Completed external actions are not rolled back.')
           return { status: 'terminal', outcome: { status: 'completed', result: null } }
         }, ctx)
       }

@@ -1,9 +1,20 @@
 import { DiscordAdapter } from '@chat-adapter/discord'
+import { AccessDenied } from 'access'
 import type { Author } from 'chat'
 import type { PlatformAccount } from 'extensions/identity'
 import { discordDestination } from 'extensions/chat/adapters/discord-destination'
 
 export class Discord extends DiscordAdapter {
+  private async accessGet(path: string) {
+    try {
+      return await this.discordFetch(path, 'GET')
+    } catch (error) {
+      const status = (error as { originalError?: { status?: number } }).originalError?.status
+      if (status === 403 || status === 404) throw new AccessDenied('Discord conversation or membership is missing or inaccessible', { cause: error })
+      throw error
+    }
+  }
+
   // Recheck platform membership, including private-thread membership and channel permissions.
   async sandboxAudience(threadId: string, accounts: PlatformAccount[]) {
     await Promise.all(accounts.map(account => this.resolveDestination(threadId, account, threadId)))
@@ -11,13 +22,7 @@ export class Discord extends DiscordAdapter {
   }
 
   async resolveDestination(threadId: string, account: PlatformAccount, reference: string) {
-    const destination = await discordDestination(
-      path => this.discordFetch(path, 'GET'),
-      this.decodeThreadId(threadId).guildId,
-      account,
-      reference,
-      this.botUserId!
-    )
+    const destination = await discordDestination(path => this.accessGet(path), this.decodeThreadId(threadId).guildId, account, reference, this.botUserId!)
     return { threadId: this.encodeThreadId(destination), title: destination.title }
   }
 
@@ -28,7 +33,7 @@ export class Discord extends DiscordAdapter {
   async privateRecipient(threadId: string) {
     const { guildId, channelId, threadId: childId } = this.decodeThreadId(threadId)
     if (guildId !== '@me' || childId) return null
-    const channel = (await (await this.discordFetch(`/channels/${channelId}`, 'GET')).json()) as {
+    const channel = (await (await this.accessGet(`/channels/${channelId}`)).json()) as {
       id: string
       type: number
       recipients?: { id: string; bot?: boolean }[]
