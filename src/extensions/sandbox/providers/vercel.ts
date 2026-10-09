@@ -1,8 +1,10 @@
 import { join } from 'node:path'
+import type { Readable } from 'node:stream'
 import type { Context } from '@earendil-works/chord'
 import { APIError, Drive, Sandbox, type NetworkPolicy } from '@vercel/sandbox'
 import type { SandboxProvider } from 'extensions/sandbox/providers'
 import { VercelEnv } from 'extensions/sandbox/providers/vercel-env'
+import { execHelper, execHelperPath } from 'extensions/sandbox/providers/vercel-exec'
 
 export class Vercel implements SandboxProvider {
   readonly name = 'vercel'
@@ -16,6 +18,9 @@ export class Vercel implements SandboxProvider {
     'Files under /data survive sandbox replacement and snapshot expiration; files elsewhere only persist with the sandbox snapshot. Keep installed system tools in the image and temporary files, sockets, process IDs, and desktop credentials under /tmp. Never put bot-host credentials on the Drive.',
     'File reads are limited to 16 MiB; use bash to select portions of larger files. Command output capture is limited to 128 MiB.'
   ].join('\n')
+
+  // A named sandbox outlives its VM. Cache preparation only for the current VM, never its SDK handle.
+  private prepared = new Map<string, { sessionId: string; home: string }>()
 
   constructor(private options: { image?: string; networkPolicy?: NetworkPolicy } = {}) {}
 
@@ -32,6 +37,23 @@ export class Vercel implements SandboxProvider {
     return token && teamId && projectId ? { token, teamId, projectId } : undefined
   }
 
+  private async helperReady(sandbox: Sandbox, ctx: Context) {
+    // The native file API is invisible in the command list. Bound the read to our small script.
+    const stream = (await sandbox.readFile({ path: execHelperPath }, { signal: ctx.abortSignal })) as Readable | null
+    if (!stream) return false
+    const expected = Buffer.from(execHelper)
+    let bytes = 0
+    try {
+      for await (const chunk of stream) {
+        if (!expected.subarray(bytes, bytes + chunk.length).equals(chunk)) return false
+        bytes += chunk.length
+      }
+      return bytes === expected.length
+    } finally {
+      stream.destroy()
+    }
+  }
+
   async open(workspace: Parameters<SandboxProvider['open']>[0], ctx: Context) {
     const credentials = await this.credentials()
     if (!credentials)
@@ -45,6 +67,7 @@ export class Vercel implements SandboxProvider {
     const retention = { snapshotExpiration, keepLastSnapshots: { count: 1, expiration: snapshotExpiration, deleteEvicted: true } }
     const sandbox = await Sandbox.get({ ...base, resume: true }).catch(async error => {
       if (error instanceof APIError && error.response.status === 410 && error.json?.error?.code === 'snapshot_not_found') {
+        this.prepared.delete(workspace.id)
         const expired = await Sandbox.get(base)
         await expired.delete({ deleteOrphanSnapshots: true, signal: ctx.abortSignal })
         throw new Error(
@@ -70,20 +93,6 @@ export class Vercel implements SandboxProvider {
       if (privateWorkspace) {
         const mount = sandbox.mounts?.['/data']
         if (mount?.drive !== driveName || mount.mode !== 'read-write') throw new Error('Private workspace /data must mount its own writable Drive')
-        const prepared = await sandbox.runCommand({
-          cmd: 'bun',
-          args: [
-            '-e',
-            `
-            import { mkdir, symlink } from 'node:fs/promises'
-            for (const path of ['/data/workspace', '/data/config', '/data/browser/profile', '/vercel/desktop']) await mkdir(path, { recursive: true })
-            await symlink('/data/browser/profile', '/vercel/desktop/profile').catch(error => { if (error.code !== 'EEXIST') throw error })
-          `
-          ],
-          timeoutMs: 120_000,
-          signal: ctx.abortSignal
-        })
-        if (prepared.exitCode !== 0) throw new Error(await prepared.stderr({ signal: ctx.abortSignal }))
       }
       if (
         sandbox.snapshotExpiration !== snapshotExpiration ||
@@ -92,16 +101,43 @@ export class Vercel implements SandboxProvider {
         sandbox.keepLastSnapshots?.deleteEvicted !== true
       )
         await sandbox.update(retention, { signal: ctx.abortSignal })
-      // Managed images keep tool configuration in their own HOME; do not replace it with our working directory.
-      const home = await sandbox.runCommand({ cmd: 'printenv', args: ['HOME'], timeoutMs: 30_000, signal: ctx.abortSignal })
-      if (home.exitCode !== 0) throw new Error('Sandbox image must define HOME')
-      const env = new VercelEnv(sandbox, (await home.stdout({ signal: ctx.abortSignal })).trimEnd(), privateWorkspace ? '/data/workspace' : '/vercel/sandbox')
-      await sandbox.fs.mkdir(env.cwd, { recursive: true, signal: ctx.abortSignal })
+      const sessionId = sandbox.currentSession().sessionId
+      let prepared = this.prepared.get(workspace.id)
+      if (prepared?.sessionId === sessionId && !(await this.helperReady(sandbox, ctx))) prepared = undefined
+      if (!prepared || prepared.sessionId !== sessionId) {
+        this.prepared.delete(workspace.id)
+        const setup = await sandbox.runCommand({
+          cmd: 'bun',
+          args: [
+            '-e',
+            `
+            import { mkdir, symlink } from 'node:fs/promises'
+            const privateWorkspace = process.argv[1] === 'private'
+            for (const path of privateWorkspace ? ['/data/workspace', '/data/config', '/data/browser/profile', '/vercel/desktop'] : ['/vercel/sandbox'])
+              await mkdir(path, { recursive: true })
+            if (privateWorkspace) await symlink('/data/browser/profile', '/vercel/desktop/profile').catch(error => { if (error.code !== 'EEXIST') throw error })
+            if (!process.env.HOME) throw new Error('Sandbox image must define HOME')
+            process.stdout.write(process.env.HOME)
+            `,
+            privateWorkspace ? 'private' : 'shared'
+          ],
+          timeoutMs: 120_000,
+          signal: ctx.abortSignal
+        })
+        if (setup.exitCode !== 0) throw new Error(await setup.stderr({ signal: ctx.abortSignal }))
+        // Managed images keep tool configuration in their own HOME; never replace it.
+        const home = (await setup.stdout({ signal: ctx.abortSignal })).trimEnd()
+        await sandbox.writeFiles([{ path: execHelperPath, content: execHelper }], { signal: ctx.abortSignal })
+        ctx.abortSignal?.throwIfAborted()
+        this.prepared.set(workspace.id, (prepared = { sessionId, home }))
+      }
+      const env = new VercelEnv(sandbox, prepared.home, privateWorkspace ? '/data/workspace' : '/vercel/sandbox')
       // Leave time for a maximum-length command plus the idle window, even in a reused session.
       if (sandbox.expiresAt && sandbox.expiresAt.getTime() - Date.now() < 15 * 60_000) await sandbox.extendTimeout(20 * 60_000, { signal: ctx.abortSignal })
       return {
         env,
         stop: async (context: Context) => {
+          this.prepared.delete(workspace.id)
           try {
             await env.desktop.stop(context)
           } finally {
@@ -110,6 +146,7 @@ export class Vercel implements SandboxProvider {
         }
       }
     } catch (error) {
+      this.prepared.delete(workspace.id)
       await sandbox.stop({ signal: AbortSignal.timeout(5_000) }).catch(stopError => console.error('[sandbox] Setup cleanup failed', stopError))
       throw error
     }

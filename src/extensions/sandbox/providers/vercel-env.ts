@@ -17,6 +17,7 @@ import {
 } from '@earendil-works/pi-durable/env'
 import type { Sandbox, Command } from '@vercel/sandbox'
 import { VercelDesktop } from 'extensions/sandbox/providers/vercel-desktop'
+import { cleanupScript, execHelperPath } from 'extensions/sandbox/providers/vercel-exec'
 
 const codes: Record<string, FileErrorCode> = {
   ENOENT: 'not_found',
@@ -31,7 +32,7 @@ const codes: Record<string, FileErrorCode> = {
 export class VercelEnv implements ExecutionEnv {
   readonly id: string
   readonly desktop: VercelDesktop
-  private active = new Map<string, Command | undefined>()
+  private active = new Map<string, { command?: Command; output: string; spilled: boolean }>()
 
   constructor(
     private sandbox: Sandbox,
@@ -214,18 +215,23 @@ export class VercelEnv implements ExecutionEnv {
   }
 
   // A separate process group allows cancellation to stop pipelines and child processes too.
-  private async kill(pidFile: string, command?: Command) {
+  private async cleanupCommand(pidFile: string, state: { command?: Command; output: string; spilled: boolean }) {
     const signal = AbortSignal.timeout(5_000)
     try {
-      await this.sandbox.runCommand({
+      // Cleanup must not depend on a /tmp helper the user command may have removed or changed.
+      const cleaned = await this.sandbox.runCommand({
         cmd: '/bin/bash',
-        args: ['-c', 'if read -r pid < "$1"; then kill -KILL -- "-$pid" 2>/dev/null || true; fi', '--', pidFile],
+        args: ['-c', cleanupScript, 'cleanup', pidFile, state.output, state.spilled ? 'keep' : 'remove'],
         signal,
         timeoutMs: 5_000
       })
+      if (cleaned.exitCode !== 0) throw new Error('Sandbox command cleanup failed')
     } finally {
-      if (command && command.exitCode === null) await command.kill('SIGKILL', { abortSignal: signal })
+      // A failed start may not have written the group PID yet. Native kill is a fallback,
+      // not a replacement for killing the process group (including orphaned children).
+      if (state.command && state.command.exitCode === null) await state.command.kill('SIGKILL', { abortSignal: AbortSignal.timeout(5_000) })
     }
+    this.active.delete(pidFile)
   }
 
   async exec(command: string, options: ShellExecOptions = {}, ctx: Context): Promise<Result<ShellExecResult, ExecutionError>> {
@@ -235,16 +241,15 @@ export class VercelEnv implements ExecutionEnv {
     const prefix = `/tmp/clanker-${crypto.randomUUID()}`
     const pidFile = `${prefix}.pid`,
       output = `${prefix}.log`
-    let spilled = false,
-      bytes = 0,
+    let bytes = 0,
       newlines = 0,
       partial = false,
       callbackFailed = false
-    this.active.set(pidFile, undefined)
+    const state = { output, spilled: false, command: undefined as Command | undefined }
+    this.active.set(pidFile, state)
     try {
       signal.throwIfAborted()
-      const script = 'echo $$ > "$1"; set -o pipefail; /bin/bash -c "$3" 2>&1 | (ulimit -f 131072; exec tee -- "$2"); exit $?'
-      const args = ['/usr/bin/setsid', '/bin/bash', '-c', script, '--', pidFile, output, command]
+      const args = ['/usr/bin/setsid', '/bin/bash', execHelperPath, pidFile, output, command]
       const env = options.env ?? {}
       const running = await this.sandbox.runCommand({
         cmd: options.inheritEnv === false ? '/usr/bin/env' : args[0]!,
@@ -255,12 +260,12 @@ export class VercelEnv implements ExecutionEnv {
         timeoutMs,
         signal
       })
-      this.active.set(pidFile, running)
+      state.command = running
       for await (const chunk of running.logs({ signal })) {
         bytes += Buffer.byteLength(chunk.data)
         newlines += chunk.data.match(/\n/g)?.length ?? 0
         if (chunk.data) partial = !chunk.data.endsWith('\n')
-        spilled ||= !!options.spill && (bytes > options.spill.afterBytes || newlines + Number(partial) > options.spill.afterLines)
+        state.spilled ||= !!options.spill && (bytes > options.spill.afterBytes || newlines + Number(partial) > options.spill.afterLines)
         try {
           options.onOutput?.(chunk.data, ctx)
         } catch (error) {
@@ -269,23 +274,20 @@ export class VercelEnv implements ExecutionEnv {
         }
       }
       const finished = await running.wait({ signal })
-      this.active.set(pidFile, finished)
+      state.command = finished
       signal.throwIfAborted()
-      return { ok: true, value: { exitCode: finished.exitCode, ...(spilled ? { spillPath: output } : {}) } }
+      return { ok: true, value: { exitCode: finished.exitCode, ...(state.spilled ? { spillPath: output } : {}) } }
     } catch (cause) {
       const error = new ExecutionError(
         ctx.abortSignal?.aborted ? 'aborted' : deadline.aborted ? 'timeout' : callbackFailed ? 'callback_error' : 'unknown',
         cause instanceof Error ? cause.message : String(cause)
       )
-      if (spilled) error.spillPath = output
+      if (state.spilled) error.spillPath = output
       return { ok: false, error }
     } finally {
       // Also reap background children after a successful shell exits.
       try {
-        await this.kill(pidFile, this.active.get(pidFile))
-        this.active.delete(pidFile)
-        await this.sandbox.fs.rm(pidFile, { force: true, signal: AbortSignal.timeout(5_000) })
-        if (!spilled) await this.sandbox.fs.rm(output, { force: true, signal: AbortSignal.timeout(5_000) })
+        await this.cleanupCommand(pidFile, state)
       } catch (error) {
         console.error('[sandbox] Command cleanup failed', error)
       }
@@ -293,9 +295,6 @@ export class VercelEnv implements ExecutionEnv {
   }
 
   async cleanup(_ctx: Context = BACKGROUND_CONTEXT) {
-    for (const [pid, command] of this.active) {
-      await this.kill(pid, command)
-      this.active.delete(pid)
-    }
+    for (const [pid, state] of this.active) await this.cleanupCommand(pid, state)
   }
 }
