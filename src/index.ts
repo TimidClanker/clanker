@@ -1,5 +1,6 @@
 import { createRuntime } from 'runtime'
 import { createChatIntegration } from 'extensions/chat'
+import { createAdapters } from 'extensions/chat/adapters/create'
 import { createDiscovery } from 'extensions/discovery'
 import { createWeb } from 'extensions/web'
 import { createMediaGen } from 'extensions/media-gen'
@@ -8,7 +9,7 @@ import { OpenRouter } from 'extensions/media-gen/providers/openrouter'
 import { createIdentity } from 'extensions/identity'
 import { createSchedules } from 'extensions/schedules'
 import { createProjects } from 'extensions/projects'
-import { createJobs } from 'extensions/jobs'
+import { createJobs, readJob, reserveWorkspace } from 'extensions/jobs'
 import { createSandbox } from 'extensions/sandbox'
 import { Vercel } from 'extensions/sandbox/providers/vercel'
 import { models } from 'auth/store'
@@ -46,25 +47,28 @@ async function main() {
   process.once('SIGTERM', stop)
   try {
     let runtime: ReturnType<typeof createRuntime>
-    const chat = await createChatIntegration(
-      { model, thinkingLevel },
-      () => runtime.get(),
-      work => runtime.use(work)
-    )
+    const getHarness = () => runtime.get()
+    const useAgent: ReturnType<typeof createRuntime>['use'] = work => runtime.use(work)
+    const chat = await createChatIntegration({ model, thinkingLevel }, getHarness, useAgent, await createAdapters(useAgent), {
+      authorizeJob: (id, threadId, ctx) => jobs.authorize(id, threadId, ctx),
+      authorizeProject: (value, threadId, ctx) => projects.checkDisclosure(value, threadId, ctx),
+      handleAccountLink: (tx, author, messageId, text) => identity.accounts.handle(tx, author, messageId, text)
+    })
     cleanup.defer(() => chat.close())
-    const projects = createProjects(chat.schedules, () => runtime.get())
-    chat.setProjectAccess(projects)
+    const identity = createIdentity(chat.identity, getHarness)
+    const projects = createProjects(chat.access, getHarness, { readJob })
+    const jobs = createJobs({ ...chat.access, checkScope: projects.checkScope, supplyJobs: projects.supplyJobs }, getHarness)
     const discovery = createDiscovery(chat.discovery, queryModel)
     const sandboxProvider = new Vercel()
-    const sandbox = (await sandboxProvider.isConfigured()) ? createSandbox(chat.sandbox, () => runtime.get(), sandboxProvider) : undefined
+    const sandbox = (await sandboxProvider.isConfigured()) ? createSandbox({ ...chat.sandbox, reserveWorkspace }, getHarness, sandboxProvider) : undefined
     cleanup.defer(() => sandbox?.close())
     runtime = createRuntime(
       models,
       [
-        createIdentity(chat.identity),
+        identity.extension,
         chat.extension,
-        createSchedules(chat.schedules, () => runtime.get()),
-        createJobs(chat.schedules, () => runtime.get()),
+        createSchedules(chat.delivery, getHarness),
+        jobs.extension,
         projects.extension,
         discovery.extension,
         createWeb(models, selectModel(process.env.SEARCH_MODEL ?? modelSelection)),

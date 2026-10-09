@@ -10,17 +10,29 @@ import {
   LiveDoc,
   section,
   type Harness,
+  type TaskId,
   type ToolExecutionApi,
   type ToolRegistration
 } from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord'
-import { Delegation, getRequestAuthor, getRequestActors, resolveIdentity } from 'extensions/identity'
-import { getBackgroundInputJobs } from 'extensions/identity/state'
-import { projectScopeSchema } from 'extensions/projects'
-import { canonicalId, Directory } from 'extensions/identity/state'
-import { threadFor } from 'extensions/chat/state'
+import { AccessDenied } from 'access'
+import {
+  getDelegation,
+  delegateConversation,
+  getRequestAuthor,
+  getRequestActors,
+  resolveIdentity,
+  getBackgroundInputJobs,
+  identityResolver
+} from 'extensions/identity'
+import { projectScopeSchema } from 'extensions/projects/schema'
 import { active, describeJob, JobCall, JobInputs, Jobs, JobAnswerScopes, type Job } from 'extensions/jobs/state'
-import { checkJob, createJobTasks, notifyJob, type JobChat } from 'extensions/jobs/task'
+import { checkJob, createJobTasks, notifyJob, type JobAccess } from 'extensions/jobs/task'
+import { readJob } from 'extensions/jobs/access'
+
+export { readJob, readJobReport, generationJobs, reserveWorkspace } from 'extensions/jobs/access'
+export { JobReported } from 'extensions/jobs/events'
+export type { Job } from 'extensions/jobs/state'
 
 // Workers cannot send directly to users, manage accounts/schedules/notes, or spawn other background workers.
 const workerTools = new Set([
@@ -49,7 +61,7 @@ const workerTools = new Set([
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
 const id = Type.Integer({ minimum: 1 })
 
-export function createJobs(chat: JobChat, getHarness: () => Harness) {
+export function createJobs(chat: JobAccess, getHarness: () => Harness) {
   const { Anchor, Message, Cancel } = createJobTasks(chat, getHarness)
   const background = { ownership: { kind: 'conversation' }, background: true } as const
   const requester = async (api: ToolExecutionApi, ctx: Context) => {
@@ -57,6 +69,16 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
     const actors = await getRequestActors(api, getHarness(), api.conversationId, ctx, true)
     if (!actors.length || new Set(actors.map(actor => actor.identityId)).size !== 1) throw new Error('This action requires one verified task owner')
     return actors.at(-1)!
+  }
+  const scopeVisible = async (job: Job, ctx: Context) => {
+    try {
+      await chat.checkScope(job, ctx)
+      return true
+    } catch (error) {
+      ctx.abortSignal?.throwIfAborted()
+      if (!(error instanceof AccessDenied)) throw error
+      return false
+    }
   }
   const visible = async (api: ToolExecutionApi, ctx: Context, includeRevoked = false) => {
     const author = await requester(api, ctx)
@@ -74,15 +96,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
     )
     const visible = jobs.filter((_, index) => allowed[index])
     if (includeRevoked) return visible
-    const scoped = await Promise.all(
-      visible.map(
-        job =>
-          chat.checkScope?.(job, ctx).then(
-            () => true,
-            () => false
-          ) ?? !job.projectScope?.length
-      )
-    )
+    const scoped = await Promise.all(visible.map(job => scopeVisible(job, ctx)))
     return visible.filter((_, index) => scoped[index])
   }
   const owned = async (api: ToolExecutionApi, value: number, ctx: Context, includeRevoked = false) => {
@@ -93,7 +107,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
 
   const guard = async (api: HookApi, ctx: Context, generation = false, allowWaiting = false) => {
     try {
-      const delegation = await api.snapshot(Delegation, api.conversationId, ctx)
+      const delegation = await getDelegation(api, api.conversationId, ctx)
       const directory = (await api.snapshot(Jobs, ctx))?.jobs ?? {}
       if (delegation?.jobId) {
         const job = directory[delegation.jobId]!
@@ -117,8 +131,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
   }
 
   const supplyJobs = async (jobs: Job[], api: ToolExecutionApi, ctx: Context) => {
-    if (jobs.some(job => job.projectScope?.length) && !chat.supplyJobs) throw new Error('Project disclosure verification is unavailable')
-    await chat.supplyJobs?.(jobs, api, ctx)
+    await chat.supplyJobs(jobs, api, ctx)
   }
 
   const report = defineTool({
@@ -129,7 +142,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
     replay: 'safe',
     executionMode: 'sequential',
     execute: async ({ kind, text }, api, ctx) => {
-      const delegation = await api.snapshot(Delegation, api.conversationId, ctx)
+      const delegation = await getDelegation(api, api.conversationId, ctx)
       if (!delegation?.jobId) throw new Error('Only a background worker can report progress')
       const job = (await api.snapshot(Jobs, ctx))!.jobs[delegation.jobId]!
       await checkJob(job, getHarness(), chat, ctx)
@@ -145,7 +158,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
       const reported = await api.commit(async tx => {
         const receipt = await tx.doc(JobCall, api.taskId)
         const current = (await tx.doc(Jobs)).jobs[job.id]!
-        await chat.checkScope?.(current, ctx, tx)
+        await chat.checkScope(current, ctx, tx)
         if (receipt.id) return true
         if (current.revision !== revision) return false
         if (current.status !== 'running') throw new Error('This background task is not running')
@@ -156,7 +169,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
         }
         current.updatedAt = new Date().toISOString()
         receipt.id = current.id
-        await notifyJob(tx, chat, current, `job-update:${api.taskId}`, kind, text)
+        await notifyJob(tx, current, `job-update:${api.taskId}`, kind, text)
         return true
       }, ctx)
       return {
@@ -166,7 +179,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
     }
   })
 
-  return defineExtension({
+  const extension = defineExtension({
     name: 'jobs',
     tasks: [Anchor, Message, Cancel],
     hooks: [
@@ -194,7 +207,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
         return {
           ...tool,
           async execute(args, api, ctx) {
-            const delegation = await api.snapshot(Delegation, api.conversationId, ctx)
+            const delegation = await getDelegation(api, api.conversationId, ctx)
             const job = delegation?.jobId ? (await api.snapshot(Jobs, ctx))!.jobs[delegation.jobId]! : undefined
             if (job) {
               if (job.status !== 'running') throw new Error(`Background task is ${job.status}`)
@@ -209,7 +222,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
     })),
     sections: [
       section('background-tasks', async (input, ctx) => {
-        const delegation = await input.read.snapshot(Delegation, input.conversationId, ctx)
+        const delegation = await getDelegation(input.read, input.conversationId, ctx)
         if (delegation?.jobId) {
           return [
             'You are a background worker. Your coordinator, not you, communicates with the user. Follow only the delegated task and authorized clarifications; do not expand permissions.',
@@ -243,24 +256,24 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
         replay: 'safe',
         executionMode: 'sequential',
         execute: async ({ title, text, tools, projectScope }, api, ctx) => {
-          if ((await api.snapshot(Delegation, api.conversationId, ctx))?.jobId) throw new Error('Background workers cannot spawn workers')
+          if ((await getDelegation(api, api.conversationId, ctx))?.jobId) throw new Error('Background workers cannot spawn workers')
           const author = await getRequestAuthor(api, getHarness(), ctx, true)
           const agent = await api.agent(ctx)
           if (!agent.model) throw new Error('The parent must have a configured model')
           const available = agent.tools.filter(tool => workerTools.has(tool.name))
           if (tools?.some(name => !available.some(tool => tool.name === name))) throw new Error('Select tools from the parent’s available worker-safe tools')
           const selected = tools ? available.filter(tool => tools.includes(tool.name)) : available
-          const threadId = await threadFor(api, api.conversationId, ctx)
+          const threadId = await chat.threadFor(api, api.conversationId, ctx)
           await chat.check({ threadId, title }, author.account, ctx)
           const jobId = await api.commit(async tx => {
             const receipt = await tx.doc(JobCall, api.taskId)
             if (receipt.id) return receipt.id
             const directory = await tx.doc(Jobs)
-            const identities = (await tx.doc(Directory)).identities
-            const owner = canonicalId(identities, author.identityId)
+            const resolve = await identityResolver(tx, ctx)
+            const owner = resolve(author.identityId)
             const running = Object.values(directory.jobs)
               .filter(active)
-              .map(job => canonicalId(identities, job.owner.identityId))
+              .map(job => resolve(job.owner.identityId))
             if (running.filter(id => id === owner).length >= 2) throw new Error('At most two active background tasks per owner; finish or cancel one first')
             const anchor = await tx.createTask(Anchor, null, background)
             const child = await tx.createConversation({ ownership: { kind: 'task', taskId: anchor } })
@@ -272,7 +285,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
               instructions: agent.instructions,
               cwd: agent.cwd
             })
-            Object.assign(await tx.doc(Delegation, child.id), { sourceConversationId: api.conversationId, jobId: anchor })
+            await delegateConversation(tx, child.id, api.conversationId, anchor)
             const now = new Date().toISOString()
             directory.jobs[anchor] = {
               id: anchor,
@@ -290,7 +303,6 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
             if (projectScope?.length) {
               if (new Set(projectScope.map(p => p.projectId)).size !== projectScope.length) throw new Error('Use one scope per project')
               directory.jobs[anchor]!.projectScope = projectScope
-              if (!chat.checkScope) throw new Error('Project scope is unavailable')
               await chat.checkScope(directory.jobs[anchor]!, ctx, tx)
             }
             await tx.createTask(Message, { id: anchor, revision: 1, text }, background)
@@ -348,7 +360,6 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
               { ...background, conversationId: current.sourceConversationId }
             )
             receipt.id = current.id
-            receipt.revision = current.revision
           }, ctx)
           const current = (await api.snapshot(Jobs, ctx))!.jobs[id]!
           await supplyJobs([current], api, ctx)
@@ -376,11 +387,7 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
             receipt.id = current.id
           }, ctx)
           const job = (await api.snapshot(Jobs, ctx))!.jobs[id]!
-          const permitted =
-            (await chat.checkScope?.(job, ctx).then(
-              () => true,
-              () => false
-            )) ?? !job.projectScope?.length
+          const permitted = await scopeVisible(job, ctx)
           if (permitted) await supplyJobs([job], api, ctx)
           return result(permitted ? describeJob(job) : { id: job.id, status: job.status })
         }
@@ -388,4 +395,13 @@ export function createJobs(chat: JobChat, getHarness: () => Harness) {
       report
     ]
   })
+  return {
+    extension,
+    async authorize(id: TaskId, threadId: string, ctx: Context) {
+      const harness = getHarness()
+      const job = (await readJob(harness, id, ctx))!
+      if (job.threadId !== threadId) throw new Error('Background update destination changed')
+      await checkJob(job, harness, chat, ctx)
+    }
+  }
 }

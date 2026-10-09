@@ -1,4 +1,5 @@
 import type { Context } from '@earendil-works/chord'
+import { AccessDenied } from 'access'
 import {
   defineDoc,
   LiveDoc,
@@ -33,7 +34,7 @@ const ConversationIdentities = defineDoc<{
 })
 
 /** Host-only origin of a delegated conversation. Never accept this from model arguments. */
-export const Delegation = defineDoc<{ sourceConversationId?: ConversationId; jobId?: TaskId }>({
+const Delegation = defineDoc<{ sourceConversationId?: ConversationId; jobId?: TaskId }>({
   kind: 'identity.delegation',
   version: 1,
   scope: 'conversation',
@@ -43,7 +44,16 @@ export const Delegation = defineDoc<{ sourceConversationId?: ConversationId; job
 })
 
 export async function sourceConversation(read: DocumentReader, conversationId: ConversationId, ctx: Context) {
-  return (await read.snapshot(Delegation, conversationId, ctx))?.sourceConversationId ?? conversationId
+  return (await getDelegation(read, conversationId, ctx))?.sourceConversationId ?? conversationId
+}
+
+export async function getDelegation(read: DocumentReader | Tx, conversationId: ConversationId, ctx: Context) {
+  const delegation = await ('doc' in read ? read.doc(Delegation, conversationId) : read.snapshot(Delegation, conversationId, ctx))
+  return delegation && { ...delegation }
+}
+
+export async function delegateConversation(tx: Tx, conversationId: ConversationId, sourceConversationId: ConversationId, jobId?: TaskId) {
+  Object.assign(await tx.doc(Delegation, conversationId), { sourceConversationId, jobId })
 }
 
 export const accountKey = ({ platform, scope, userId }: PlatformAccount) => JSON.stringify([platform, scope, userId])
@@ -109,8 +119,14 @@ export async function linkIdentities(tx: Tx, keepId: string, otherId: string) {
 
 /** Resolve saved IDs after account linking; old references remain valid. For trusted application code. */
 export async function resolveIdentity(read: DocumentReader, identityId: string, ctx: Context) {
-  const directory = await read.snapshot(Directory, ctx)
-  return canonicalId(directory?.identities ?? {}, identityId)
+  return (await identityResolver(read, ctx))(identityId)
+}
+
+/** Resolve several saved IDs against one current snapshot without exposing the directory. */
+export async function identityResolver(read: DocumentReader | Tx, ctx: Context) {
+  const directory = 'doc' in read ? await read.doc(Directory) : await read.snapshot(Directory, ctx)
+  const identities = directory?.identities ?? {}
+  return (id: string) => canonicalId(identities, id)
 }
 
 /** Include aliases only when reading state saved under previously linked identities. */
@@ -144,7 +160,7 @@ export async function getParticipants(read: DocumentReader, conversationId: Conv
 export async function getRequestAuthor(api: ToolExecutionApi, harness: Pick<Harness, 'submission'>, ctx: Context, allowSchedules = false): Promise<Author> {
   const authors = await getRequestActors(api, harness, api.conversationId, ctx, allowSchedules ? 'schedules' : false)
   if (!authors.length || new Set(authors.map(author => author.identityId)).size !== 1) {
-    throw new Error(
+    throw new AccessDenied(
       'This action needs a request from one verified user. If several people contributed to this run, ask the owner to repeat the request separately.'
     )
   }
@@ -171,10 +187,11 @@ export async function getRequestActors(
     const owner = key ? automated?.[key] : undefined
     if (owner && (!includeAutomated || (includeAutomated === 'schedules' && (owner === true || owner.kind !== 'schedule')))) continue
     const author = owner ?? (key ? conversation?.messages[key] : undefined)
-    if (!author || author === true) throw new Error('An admitted input has no verified author')
+    if (!author) throw new Error('An admitted input has no verified author')
+    if (author === true) throw new AccessDenied('An admitted input has no verified author')
     const identityId = canonicalId(directory!.identities, author.identityId)
     if (canonicalId(directory!.identities, directory!.accounts[accountKey(author.account)]!) !== identityId) {
-      throw new Error('This account’s identity changed after that message. Please send a new request.')
+      throw new AccessDenied('This account’s identity changed after that message. Please send a new request.')
     }
     authors.push({ identityId, account: author.account, displayName: author.displayName })
   }

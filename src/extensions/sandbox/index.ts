@@ -7,11 +7,12 @@ import {
   type ConversationId,
   type DocumentReader,
   type Harness,
-  type ToolRegistration
+  type ToolRegistration,
+  type TaskId,
+  type Tx
 } from '@earendil-works/pi-durable'
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from '@earendil-works/pi-durable/tools'
-import { Delegation, sourceConversation, findIdentity, getIdentity, getRequestActors, type PlatformAccount } from 'extensions/identity'
-import { active, Jobs, WorkspaceJobs } from 'extensions/jobs/state'
+import { getDelegation, sourceConversation, findIdentity, getIdentity, getRequestActors, type PlatformAccount } from 'extensions/identity'
 import { createWorkspaces } from 'extensions/sandbox/workspaces'
 import { ownerKey, Workspaces, type SandboxOwner } from 'extensions/sandbox/state'
 import type { SandboxProvider } from 'extensions/sandbox/providers'
@@ -21,6 +22,7 @@ import { ImageTool } from 'extensions/sandbox/image'
 export type SandboxAccess = {
   /** Verify every requester's membership; return the recipient for private chats, null for groups. */
   audience(read: DocumentReader, conversationId: ConversationId, accounts: PlatformAccount[], ctx: Context): Promise<PlatformAccount | null>
+  reserveWorkspace(tx: Tx, workspaceId: string, jobId?: TaskId): Promise<void>
 }
 type Grant = { accounts: PlatformAccount[] } | { error: string }
 
@@ -52,7 +54,7 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
         owner = { kind: 'identity', ...(await getIdentity(api, id, ctx)) }
       }
       const key = ownerKey(owner)
-      const delegation = await api.snapshot(Delegation, api.conversationId, ctx)
+      const delegation = await getDelegation(api, api.conversationId, ctx)
       const workspace = await api.commit(async tx => {
         const all = await tx.doc(Workspaces)
         const previous = [
@@ -66,16 +68,7 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
         if (!all[key] && previous.length > 1) throw new Error('Linked identities have multiple workspaces; choose a workspace before continuing')
         const saved = (all[key] ??= previous[0] ?? { id: `clanker-${crypto.randomUUID()}`, provider: provider.name })
         if (saved.provider !== provider.name) throw new Error(`This workspace uses the ${saved.provider} provider`)
-        const leases = await tx.doc(WorkspaceJobs)
-        const jobs = (await tx.doc(Jobs)).jobs
-        const holder = jobs[leases[saved.id]!]
-        if (holder && active(holder) && holder.id !== delegation?.jobId) {
-          throw new Error(`Sandbox is reserved by background task “${holder.title}”. Steer or cancel it before using this workspace.`)
-        }
-        if (delegation?.jobId) {
-          if (jobs[delegation.jobId]?.status !== 'running') throw new Error('Background task is not running')
-          leases[saved.id] = delegation.jobId
-        } else delete leases[saved.id]
+        await access.reserveWorkspace(tx, saved.id, delegation?.jobId)
         return { ...saved }
       }, ctx)
       return workspaces.use({ ...workspace, scope: owner.kind }, ctx, env => tool.execute(args, { ...api, env }, ctx))

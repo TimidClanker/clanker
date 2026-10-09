@@ -1,6 +1,6 @@
 import { defineDoc, type ConversationId, type EntryId, type TaskId } from '@earendil-works/pi-durable'
 import type { Author } from 'extensions/identity'
-import type { ProjectScope } from 'extensions/projects/state'
+import type { ProjectScope } from 'extensions/projects'
 
 export type Job = {
   id: TaskId
@@ -35,7 +35,7 @@ export const JobInputs = defineDoc<Record<string, number>>({
   fork: 'initial',
   initial: () => ({})
 })
-export const JobCall = defineDoc<{ id?: TaskId; revision?: number }>({
+export const JobCall = defineDoc<{ id?: TaskId }>({
   kind: 'jobs.call',
   version: 1,
   scope: 'task',

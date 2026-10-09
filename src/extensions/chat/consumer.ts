@@ -3,13 +3,14 @@ import type { Context } from '@earendil-works/chord'
 import type { AssistantMessage } from '@earendil-works/pi-ai'
 import { AssistantEntry, watchEvents, type ConversationId, type Cursor, type EntryId, type EntryRecord, type Harness } from '@earendil-works/pi-durable'
 import { Messages, Threads, listSources } from 'extensions/chat/state'
-import { Delegation } from 'extensions/identity'
-import { ProjectDisclosures } from 'extensions/projects/state'
-import { JobAnswerScopes } from 'extensions/jobs/state'
-import type { createPost } from 'extensions/chat/post'
+import { getDelegation } from 'extensions/identity'
+import { generationDisclosures } from 'extensions/projects'
+import { generationJobs, readJobReport } from 'extensions/jobs'
+import type { createPostQueue } from 'extensions/chat/post'
+import type { ChatDelivery } from 'extensions/chat/contracts'
 
 /** One committed-message consumer per foreground chat, independent of submission/task cancellation. */
-export function createMessageConsumer(Post: ReturnType<typeof createPost>) {
+export function createMessageConsumer(enqueuePost: ReturnType<typeof createPostQueue>, enqueueReply: ChatDelivery['enqueue']) {
   let active: Harness | undefined
   const consumers = new Map<ConversationId, Promise<Awaited<ReturnType<typeof open>>>>()
 
@@ -21,7 +22,7 @@ export function createMessageConsumer(Post: ReturnType<typeof createPost>) {
     const consume = (entries: readonly EntryRecord[], recovery?: true | EntryId) => {
       const result = harness.commit(async tx => {
         if (stopped) throw new Error('Chat message consumer stopped')
-        if ((await tx.doc(Threads)).threads[threadId] !== conversationId || (await tx.doc(Delegation, conversationId)).jobId !== undefined)
+        if ((await tx.doc(Threads)).threads[threadId] !== conversationId || (await getDelegation(tx, conversationId, context))?.jobId !== undefined)
           throw new Error('Only the mapped chat coordinator can deliver assistant messages')
         const messages = await tx.doc(Messages, conversationId)
         const examined = messages.cursor ?? messages.lastAnswer
@@ -37,13 +38,17 @@ export function createMessageConsumer(Post: ReturnType<typeof createPost>) {
           } while (cursor !== undefined)
           pending = found
         }
-        const scopes = await tx.doc(JobAnswerScopes, conversationId)
-        const disclosures = await tx.doc(ProjectDisclosures, conversationId)
         const ready = []
         let next = examined
         for (const entry of [...pending].sort((a, b) => a.id - b.id)) {
           if (entry.conversationId !== conversationId || (examined !== undefined && entry.id <= examined)) continue
           next = entry.id
+          const report = await readJobReport(tx, entry, context)
+          if (report) {
+            if (messages.received[report.requestId] !== undefined) continue
+            ready.push({ kind: 'report' as const, report })
+            continue
+          }
           if (!AssistantEntry.is(entry)) continue
           const answer = entry.model?.[0] as AssistantMessage | undefined
           if (!answer || answer.role !== 'assistant' || !['stop', 'length', 'toolUse'].includes(answer.stopReason)) continue
@@ -57,21 +62,30 @@ export function createMessageConsumer(Post: ReturnType<typeof createPost>) {
           if (generation?.kind !== 'pi.generation') throw new Error('Assistant delivery origin unavailable')
           // Cancellation can win the enqueue race; don't create a new Post for withdrawn work.
           if (generation.abortRequested) continue
-          const jobs = scopes.generations[generation.id]
-          const projects = disclosures.generations[generation.id]
+          const jobs = await generationJobs(tx, conversationId, generation.id)
+          const projects = await generationDisclosures(tx, conversationId, generation.id)
           if (jobs === undefined || projects === undefined) throw new Error('Assistant delivery authorization evidence unavailable')
-          ready.push({ entry: entry.id, text, jobs, projects })
+          ready.push({ kind: 'answer' as const, entry: entry.id, text, jobs, projects })
         }
         // All reads precede task writes; receipts, immutable envelopes and the cursor commit together.
-        for (const { entry, text, jobs, projects } of ready) {
-          const post = await tx.createTask(
-            Post,
-            { threadId, text, jobs, projects, previous: messages.lastPost },
-            { conversationId, ownership: { kind: 'conversation' } }
-          )
+        for (const item of ready) {
+          if (item.kind === 'report') {
+            const { requestId, jobId, threadId, owner, title, revision, kind, text } = item.report
+            if (messages.received[requestId] !== undefined) continue
+            messages.received[requestId] = await enqueueReply(tx, conversationId, {
+              requestId,
+              threadId,
+              owner,
+              internal: true,
+              job: jobId,
+              text: `[Background task update]\n${JSON.stringify({ id: jobId, title, revision, kind, text })}`
+            })
+            continue
+          }
+          const { entry, text, jobs, projects } = item
+          const post = await enqueuePost(tx, conversationId, { threadId, text, jobs, projects }, { conversationId, ownership: { kind: 'conversation' } })
           messages.replies ??= {}
           messages.replies[entry] = post
-          messages.lastPost = post
         }
         messages.cursor = next
         return messages.lastPost
@@ -83,9 +97,9 @@ export function createMessageConsumer(Post: ReturnType<typeof createPost>) {
       // Atomic attach happens before recovery. Events arriving during recovery remain queued.
       await consume([], true)
       stream.start(async events => {
-        if (stopped || !events.some(event => event.type === 'message_end' || event.type === 'snapshot')) return
+        if (stopped || !events.some(event => event.type === 'message_end' || event.type === 'entry_appended' || event.type === 'snapshot')) return
         await consume(
-          events.flatMap(event => (event.type === 'message_end' ? [event.entry] : [])),
+          events.flatMap(event => (event.type === 'message_end' || event.type === 'entry_appended' ? [event.entry] : [])),
           events.some(event => event.type === 'snapshot') ? true : undefined
         )
       })
