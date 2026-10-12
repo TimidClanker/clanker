@@ -6,6 +6,12 @@ import {
   ExecutionError,
   FileError,
   getOrThrow,
+  type BinaryReader,
+  type DirReader,
+  type FileWatcher,
+  type WatchTarget,
+  type WatchChange,
+  StreamDecoder,
   type ExecutionEnv,
   type FileErrorCode,
   type FileInfo,
@@ -17,6 +23,7 @@ import {
 } from '@earendil-works/pi-durable/env'
 import type { Sandbox, Command } from '@vercel/sandbox'
 import { VercelDesktop } from 'extensions/sandbox/providers/vercel-desktop'
+import { VercelReaders } from 'extensions/sandbox/providers/vercel-readers'
 import { cleanupScript, execHelperPath } from 'extensions/sandbox/providers/vercel-exec'
 
 const codes: Record<string, FileErrorCode> = {
@@ -32,6 +39,8 @@ const codes: Record<string, FileErrorCode> = {
 export class VercelEnv implements ExecutionEnv {
   readonly id: string
   readonly desktop: VercelDesktop
+  private textReaders = new Set<() => Promise<void>>()
+  private readers: VercelReaders
   private active = new Map<string, { command?: Command; output: string; spilled: boolean }>()
 
   constructor(
@@ -39,6 +48,7 @@ export class VercelEnv implements ExecutionEnv {
     private home: string,
     readonly cwd = '/vercel/sandbox'
   ) {
+    this.readers = new VercelReaders(sandbox)
     this.id = `vercel:${sandbox.name}`
     this.desktop = new VercelDesktop(sandbox)
   }
@@ -81,15 +91,26 @@ export class VercelEnv implements ExecutionEnv {
   readTextFile(path: string, ctx: Context) {
     return this.file(path, ctx, async () => new TextDecoder().decode(getOrThrow(await this.readBinaryFile(path, ctx))))
   }
+  private async fileStream(path: string, ctx: Context) {
+    const signal = AbortSignal.any([AbortSignal.timeout(30_000), ...(ctx.abortSignal ? [ctx.abortSignal] : [])])
+    const stat = await this.sandbox.fs.stat(this.path(path), { signal })
+    if (stat.isDirectory()) throw new FileError('is_directory', 'Not a regular file', path)
+    if (!stat.isFile()) throw new FileError('invalid', 'Not a regular file', path)
+    if (stat.size > 16 * 1024 * 1024) throw new FileError('invalid', 'File exceeds the 16 MiB read limit; use bash to select a smaller portion', path)
+    const stream = (await this.sandbox.readFile({ path: this.path(path) }, { signal })) as Readable | null
+    if (!stream) throw new FileError('not_found', 'File not found', path)
+    return stream
+  }
+
   readBinaryFile(path: string, ctx: Context) {
     return this.file(path, ctx, async () => {
-      const stream = (await this.sandbox.readFile({ path: this.path(path) }, { signal: ctx.abortSignal })) as Readable | null
-      if (!stream) throw new FileError('not_found', 'File not found', path)
+      const stream = await this.fileStream(path, ctx)
       const chunks: Buffer[] = []
       let size = 0
       try {
         for await (const chunk of stream) {
           size += chunk.length
+          if (chunks.length >= 65536) throw new FileError('invalid', 'File response has too many chunks', path)
           if (size > 16 * 1024 * 1024) throw new FileError('invalid', 'File exceeds the 16 MiB read limit; use bash to select a smaller portion', path)
           chunks.push(chunk)
         }
@@ -162,14 +183,18 @@ export class VercelEnv implements ExecutionEnv {
 
   openTextLineReader(path: string, ctx: Context): Promise<Result<TextLineReader, FileError>> {
     return this.file(path, ctx, async () => {
-      const stream = (await this.sandbox.readFile({ path: this.path(path) }, { signal: ctx.abortSignal })) as Readable | null
-      if (!stream) throw new FileError('not_found', 'File not found', path)
+      const stream = await this.fileStream(path, ctx)
       async function* lines(): AsyncGenerator<TextLine> {
-        const decoder = new TextDecoder()
-        let buffer = ''
+        const decoder = new StreamDecoder()
+        let buffer = '',
+          bytes = 0,
+          chunks = 0
         try {
           for await (const chunk of stream!) {
-            buffer += decoder.decode(chunk, { stream: true })
+            if (++chunks > 65536) throw new FileError('invalid', 'Text response has too many chunks', path)
+            bytes += chunk.length
+            if (bytes > 16 * 1024 * 1024) throw new FileError('invalid', 'Text line reader exceeds the 16 MiB read limit', path)
+            buffer += decoder.decode(chunk)
             let end
             while ((end = buffer.indexOf('\n')) !== -1) {
               yield { text: buffer.slice(0, end).replace(/\r$/, ''), terminated: true }
@@ -183,17 +208,58 @@ export class VercelEnv implements ExecutionEnv {
         }
       }
       const reader = lines()
-      return {
-        readLine: (context: Context) =>
-          this.file(path, context, async () => {
-            const next = await reader.next()
-            return next.done ? undefined : next.value
-          }),
-        close: async () => {
+      let closing: Promise<void> | undefined
+      const close = () =>
+        (closing ??= (async () => {
           stream.destroy()
           await reader.return(undefined)
-        }
+          this.textReaders.delete(close)
+        })())
+      this.textReaders.add(close)
+      return {
+        readLine: async (context: Context) => {
+          const abort = () => stream.destroy()
+          context.abortSignal?.addEventListener('abort', abort, { once: true })
+          try {
+            const result = await this.file(path, context, async () => {
+              const next = await reader.next()
+              context.abortSignal?.throwIfAborted()
+              return next.done ? undefined : next.value
+            })
+            if (!result.ok) await close()
+            return result
+          } finally {
+            context.abortSignal?.removeEventListener('abort', abort)
+          }
+        },
+        close
       }
+    })
+  }
+
+  openBinaryReader(path: string, options: { noFollow?: boolean } | undefined, ctx: Context): Promise<Result<BinaryReader, FileError>> {
+    return this.file(path, ctx, async () => {
+      const reader = await this.readers.open(this.path(path), 'file', options?.noFollow === true, ctx)
+      return {
+        info: context => this.file(path, context, () => reader.binary.info(context)),
+        read: (offset, length, context) => this.file(path, context, () => reader.binary.read(offset, length, context)),
+        scanLines: (options, context) => this.file(path, context, () => reader.binary.scanLines(options, context)),
+        close: reader.close
+      }
+    })
+  }
+
+  openDirReader(path: string, ctx: Context): Promise<Result<DirReader, FileError>> {
+    return this.file(path, ctx, async () => {
+      const reader = await this.readers.open(this.path(path), 'directory', false, ctx)
+      return { next: (maxEntries, context) => this.file(path, context, () => reader.next(maxEntries, context)), close: reader.close }
+    })
+  }
+
+  watch(_targets: readonly WatchTarget[], _onChange: (change: WatchChange) => void, ctx: Context): Promise<Result<FileWatcher, FileError>> {
+    return this.file('', ctx, () => {
+      // No coverage is established. Clanker does not load watched resources from this remote environment.
+      throw new FileError('not_supported', 'Remote filesystem watching is not supported')
     })
   }
 
@@ -214,9 +280,37 @@ export class VercelEnv implements ExecutionEnv {
     })
   }
 
+  private async completion(output: string, signal: AbortSignal) {
+    const path = `${output}.status`
+    const stat = await this.sandbox.fs.lstat(path, { signal })
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > 64)
+      throw new ExecutionError('unknown', 'Invalid command completion record')
+    // SDK 3.6.1 constructs a Node Readable.fromWeb here; its public type only names ReadableStream.
+    const stream = (await this.sandbox.readFile({ path }, { signal })) as Readable | null
+    if (!stream) throw new ExecutionError('unknown', 'Command completion record is missing')
+    let record = ''
+    try {
+      for await (const chunk of stream) {
+        if (Buffer.byteLength(chunk) > 64 - Buffer.byteLength(record)) throw new ExecutionError('unknown', 'Command completion record exceeds limit')
+        record += chunk.toString()
+      }
+    } finally {
+      stream.destroy()
+    }
+    signal.throwIfAborted()
+    const owner = output.slice('/tmp/clanker-'.length, -'.log'.length)
+    if (record === `${owner}:timeout`) throw new ExecutionError('timeout', 'Command execution timed out')
+    if (record === `${owner}:spawn_error`) throw new ExecutionError('spawn_error', 'Could not start requested program')
+    if (!record.startsWith(`${owner}:done:`)) throw new ExecutionError('unknown', 'Command completion could not be verified')
+    const code = record.slice(`${owner}:done:`.length)
+    if (!/^[0-9]{1,3}$/.test(code) || Number(code) > 255) throw new ExecutionError('unknown', 'Invalid command exit status')
+    return Number(code)
+  }
+
   // A separate process group allows cancellation to stop pipelines and child processes too.
   private async cleanupCommand(pidFile: string, state: { command?: Command; output: string; spilled: boolean }) {
     const signal = AbortSignal.timeout(5_000)
+    let verified = false
     try {
       // Cleanup must not depend on a /tmp helper the user command may have removed or changed.
       const cleaned = await this.sandbox.runCommand({
@@ -226,15 +320,21 @@ export class VercelEnv implements ExecutionEnv {
         timeoutMs: 5_000
       })
       if (cleaned.exitCode !== 0) throw new Error('Sandbox command cleanup failed')
+      verified = true
     } finally {
-      // A failed start may not have written the group PID yet. Native kill is a fallback,
-      // not a replacement for killing the process group (including orphaned children).
-      if (state.command && state.command.exitCode === null) await state.command.kill('SIGKILL', { abortSignal: AbortSignal.timeout(5_000) })
+      // SDK-scoped TERM asks the live supervisor to reap its own group. Never kill that leader alone.
+      if (state.command && state.command.exitCode === null) {
+        const native = AbortSignal.timeout(5_000)
+        if (!verified) await state.command.kill('SIGTERM', { abortSignal: native })
+        state.command = await state.command.wait({ signal: native })
+      }
     }
     this.active.delete(pidFile)
   }
 
-  async exec(command: string, options: ShellExecOptions = {}, ctx: Context): Promise<Result<ShellExecResult, ExecutionError>> {
+  async exec(command: string | readonly string[], options: ShellExecOptions = {}, ctx: Context): Promise<Result<ShellExecResult, ExecutionError>> {
+    if (!Number.isFinite(options.timeout ?? 120) || (options.timeout ?? 120) <= 0) return { ok: false, error: new ExecutionError('timeout', 'Invalid timeout') }
+    if (typeof command !== 'string' && !command.length) return { ok: false, error: new ExecutionError('spawn_error', 'Empty argv command') }
     const timeoutMs = Math.min(options.timeout ?? 120, 600) * 1000
     const deadline = AbortSignal.timeout(timeoutMs)
     const signal = AbortSignal.any([deadline, ...(ctx.abortSignal ? [ctx.abortSignal] : [])])
@@ -249,7 +349,16 @@ export class VercelEnv implements ExecutionEnv {
     this.active.set(pidFile, state)
     try {
       signal.throwIfAborted()
-      const args = ['/usr/bin/setsid', '/bin/bash', execHelperPath, pidFile, output, command]
+      const args = [
+        '/usr/bin/setsid',
+        '/bin/bash',
+        execHelperPath,
+        pidFile,
+        output,
+        String(timeoutMs),
+        typeof command === 'string' ? 'shell' : 'argv',
+        ...(typeof command === 'string' ? [command] : command)
+      ]
       const env = options.env ?? {}
       const running = await this.sandbox.runCommand({
         cmd: options.inheritEnv === false ? '/usr/bin/env' : args[0]!,
@@ -257,7 +366,7 @@ export class VercelEnv implements ExecutionEnv {
         cwd: this.path(options.cwd ?? this.cwd),
         env,
         detached: true,
-        timeoutMs,
+        timeoutMs: timeoutMs + 10_000, // User deadline remains unchanged; the live supervisor reaps before backend SIGKILL.
         signal
       })
       state.command = running
@@ -267,7 +376,7 @@ export class VercelEnv implements ExecutionEnv {
         if (chunk.data) partial = !chunk.data.endsWith('\n')
         state.spilled ||= !!options.spill && (bytes > options.spill.afterBytes || newlines + Number(partial) > options.spill.afterLines)
         try {
-          options.onOutput?.(chunk.data, ctx)
+          options.onOutput?.(chunk.data, ctx, { stream: chunk.stream })
         } catch (error) {
           callbackFailed = true
           throw error
@@ -276,12 +385,16 @@ export class VercelEnv implements ExecutionEnv {
       const finished = await running.wait({ signal })
       state.command = finished
       signal.throwIfAborted()
-      return { ok: true, value: { exitCode: finished.exitCode, ...(state.spilled ? { spillPath: output } : {}) } }
+      const exitCode = await this.completion(output, signal)
+      return { ok: true, value: { exitCode, ...(state.spilled ? { spillPath: output } : {}) } }
     } catch (cause) {
-      const error = new ExecutionError(
-        ctx.abortSignal?.aborted ? 'aborted' : deadline.aborted ? 'timeout' : callbackFailed ? 'callback_error' : 'unknown',
-        cause instanceof Error ? cause.message : String(cause)
-      )
+      const error =
+        cause instanceof ExecutionError
+          ? cause
+          : new ExecutionError(
+              ctx.abortSignal?.aborted ? 'aborted' : deadline.aborted ? 'timeout' : callbackFailed ? 'callback_error' : 'unknown',
+              cause instanceof Error ? cause.message : String(cause)
+            )
       if (state.spilled) error.spillPath = output
       return { ok: false, error }
     } finally {
@@ -295,6 +408,12 @@ export class VercelEnv implements ExecutionEnv {
   }
 
   async cleanup(_ctx: Context = BACKGROUND_CONTEXT) {
-    for (const [pid, state] of this.active) await this.cleanupCommand(pid, state)
+    const results = await Promise.allSettled([
+      ...[...this.textReaders].map(close => close()),
+      this.readers.cleanup(),
+      ...[...this.active].map(([pid, state]) => this.cleanupCommand(pid, state))
+    ])
+    const errors = results.flatMap(result => (result.status === 'rejected' ? [result.reason] : []))
+    if (errors.length) throw new AggregateError(errors, `Sandbox cleanup failed: ${errors.map(String).join('; ')}`)
   }
 }

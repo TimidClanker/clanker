@@ -17,9 +17,9 @@
     "@beeper/desktop-api": "6.0.0",
     "@chat-adapter/discord": "4.41.1",
     "@chat-adapter/state-memory": "4.41.1",
-    "@earendil-works/chord": "1.0.2",
-    "@earendil-works/pi-ai": "1.0.2",
-    "@earendil-works/pi-durable": "1.0.2",
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0",
     "@vercel/sandbox": "3.6.1",
     "chat": "4.41.1"
   },
