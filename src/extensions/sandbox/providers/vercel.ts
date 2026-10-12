@@ -16,7 +16,7 @@ export class Vercel implements SandboxProvider {
     '/data/config/: persistent user/tool configuration. Configure tools to use it or symlink individual configuration directories; recreate those symlinks after an image replacement.',
     '/data/browser/profile/: managed Chromium profile. The desktop manages this automatically; do not modify it while Chromium is running.',
     'Files under /data survive sandbox replacement and snapshot expiration; files elsewhere only persist with the sandbox snapshot. Keep installed system tools in the image and temporary files, sockets, process IDs, and desktop credentials under /tmp. Never put bot-host credentials on the Drive.',
-    'File reads are limited to 16 MiB; use bash to select portions of larger files. Command output capture is limited to 128 MiB.'
+    'File reads and whole-file line scans are limited to 16 MiB; offsets do not bypass the scan limit. Use bash to select portions of larger files. Command output capture is limited to 128 MiB.'
   ].join('\n')
 
   // A named sandbox outlives its VM. Cache preparation only for the current VM, never its SDK handle.
