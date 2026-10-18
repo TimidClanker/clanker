@@ -27,6 +27,7 @@ export function createMediaGen(backends: MediaBackend[], deliver: MediaDelivery)
     ],
     tools: [
       defineTool({
+        callers: ['model'],
         name: 'list_media_backends',
         description:
           'List currently authenticated media-generation backends and their image models. Missing or unresolvable credentials are excluded. Availability does not guarantee remaining quota or model access.',
@@ -40,10 +41,11 @@ export function createMediaGen(backends: MediaBackend[], deliver: MediaDelivery)
                 : []
             )
           )
-          return { content: [{ type: 'text', text: JSON.stringify({ backends: listed.flat() }) }] }
+          return { output: [{ type: 'text', text: JSON.stringify({ backends: listed.flat() }) }] }
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'generate_image',
         description: 'Generate an image from a text prompt and send it to the current chat. Specify dimensions or aspect ratio in the prompt when needed.',
         parameters: Type.Object({
@@ -72,7 +74,7 @@ export function createMediaGen(backends: MediaBackend[], deliver: MediaDelivery)
             )
           await deliver(images, api, ctx)
           return {
-            content: [
+            output: [
               { type: 'text', text: `Delivered ${images.length} generated image(s) to this chat using ${name}/${model}.` },
               ...result.output.filter(part => part.type === 'text')
             ],

@@ -3,6 +3,7 @@ import { defineTool } from '@earendil-works/pi-durable'
 import type { SandboxEnv } from 'extensions/sandbox/providers'
 
 export const DesktopTool = defineTool({
+  callers: ['model'],
   name: 'sandbox_desktop',
   description:
     'Start or reconnect to the workspace browser desktop. Returns a watch-only link and the browser skill. Use control only when handing mouse/keyboard control to a user. Stop closes the desktop and revokes its links while preserving the workspace and browser profile.',
@@ -12,10 +13,10 @@ export const DesktopTool = defineTool({
     if (!desktop) throw new Error('This sandbox provider does not support a browser desktop')
     if (action === 'stop') {
       await desktop.stop(ctx)
-      return { content: [{ type: 'text', text: 'Desktop stopped. Workspace files and the browser profile are preserved.' }] }
+      return { output: [{ type: 'text', text: 'Desktop stopped. Workspace files and the browser profile are preserved.' }] }
     }
     const url = await desktop.open(action === 'control', ctx)
     const skill = await Bun.file(`${import.meta.dir}/skills/browser/SKILL.md`).text()
-    return { content: [{ type: 'text', text: `${JSON.stringify({ mode: action, url })}\n\n${skill}` }] }
+    return { output: [{ type: 'text', text: `${JSON.stringify({ mode: action, url })}\n\n${skill}` }] }
   }
 })

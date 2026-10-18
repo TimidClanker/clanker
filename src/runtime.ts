@@ -39,7 +39,10 @@ export function createRuntime(models: Models, extensions: Extension[], signal: A
             changing = false
             ready.resolve(active)
             active.resume()
-            await Promise.race([lost.promise, stopped.promise])
+            const end = await Promise.race([lost.promise, stopped.promise, active.closed])
+            // Pi 1.2+ closes a failed Session itself. Surface the failure; never replay application work.
+            if (end?.reason === 'failed') throw end.error
+            if (end?.reason === 'closed' && !signal.aborted) throw new Error('Agent session closed unexpectedly')
           } finally {
             await active?.close(BACKGROUND_CONTEXT)
           }

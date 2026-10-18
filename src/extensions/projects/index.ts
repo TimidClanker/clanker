@@ -18,7 +18,7 @@ const revision = Type.Integer({ minimum: 1 })
 const text = (maxLength: number) => Type.String({ maxLength })
 const strings = (maxItems: number, maxLength = 1000) => Type.Array(text(maxLength), { maxItems, uniqueItems: true })
 const page = { offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) }
-const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
+const result = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] })
 const paginate = <T>(values: T[], offset = 0, limit = 10) => ({
   entries: values.slice(offset, offset + limit),
   nextOffset: offset + limit < values.length ? offset + limit : null
@@ -146,6 +146,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
       ],
       tools: [
         defineTool({
+          callers: ['model'],
           name: 'create_project',
           description: 'Create a private project for a genuine user request in a verified private chat. Creator is admin. Does not share or bind it.',
           parameters: object({ name: Type.String({ minLength: 1, maxLength: 100 }), overview: text(1200), resources: strings(10) }),
@@ -187,6 +188,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'list_projects',
           description:
             'Discover only projects accessible to the verified requester AND current audience. Optional name/overview search. Associations are navigation only.',
@@ -216,6 +218,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'get_project',
           description: 'Read one accessible project overview and resource links. Fetch knowledge/work items separately.',
           parameters: object({ projectId: id }),
@@ -228,6 +231,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'get_project_access',
           description:
             'Inspect canonical membership roles and conversation sharing grants as an admin in a verified private chat. IDs are navigation only; no linked accounts or conversation contents are disclosed.',
@@ -252,6 +256,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'update_project',
           description: 'Revise accessible project metadata with the current project revision. Does not change access.',
           parameters: object({
@@ -288,6 +293,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'resolve_project_access_target',
           description:
             'For an explicit user request to share/enroll in THIS conversation, resolve one exact project name administered by the verified requester. Returns only the intended reference/revision, never project contents or a private directory. Ambiguous names require clarification. Lookup grants no content access; use set_project_access for the deliberate change.',
@@ -320,6 +326,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'set_project_access',
           description:
             'Admin-only, genuine user request only. Explicitly grant/revoke sharing to THIS verified conversation, or enroll/change/remove an observed verified participant. May be used by an admin in an unshared group after resolving its specifically requested name with resolve_project_access_target; it returns no project content. Sharing grants audience visibility, not membership/write access. Use the resolved reference/revision or read an accessible current revision before changing it.',
@@ -364,6 +371,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'list_project_records',
           outputLimits: { maxBytes: 120_000 },
           description:
@@ -407,6 +415,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'get_project_record',
           description: 'Fetch one knowledge note or work item with provenance and revision, within current requester/audience/delegated scope.',
           parameters: object({ projectId: id, kind: Type.Union([Type.Literal('knowledge'), Type.Literal('workItems')]), recordId: id }),
@@ -421,6 +430,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'save_project_knowledge',
           description:
             'Curate a concise note. Read first to avoid duplicates; provide recordId and expectedRevision to revise an existing note. Distinguish proposals, decisions and facts. Host stamps actor/time/origin.',
@@ -442,6 +452,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
             )
         }),
         defineTool({
+          callers: ['model'],
           name: 'save_work_item',
           description:
             'Create or revise a meaningful persistent work item. Read first; updates require recordId and expectedRevision. Job completion does NOT mark it done. References are navigation strings (e.g. job:ID or artifact URL), not authority.',
@@ -472,6 +483,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
             )
         }),
         defineTool({
+          callers: ['model'],
           name: 'delete_project_record',
           description: 'Remove an outdated knowledge note or work item with a revision check. Prefer updating useful records.',
           parameters: object({
@@ -499,6 +511,7 @@ export function createProjects(chat: ProjectChat, getHarness: () => Harness, job
           }
         }),
         defineTool({
+          callers: ['model'],
           name: 'associate_project_context',
           description:
             'Replace THIS conversation’s navigation links with zero/many accessible projects and optional work items. Never grants membership/sharing. Worker scopes cannot be changed.',

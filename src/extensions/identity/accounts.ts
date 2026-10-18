@@ -49,7 +49,7 @@ const Commands = defineDoc<{ messages: Record<string, true> }>({
   fork: 'initial',
   initial: () => ({ messages: {} })
 })
-const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
+const result = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] })
 const hash = (value: string) => new Bun.CryptoHasher('sha256').update(value).digest('hex')
 const lifetime = 5 * 60_000
 
@@ -193,6 +193,7 @@ export function createAccountLinking(access: IdentityAccess, getHarness: () => H
     tasks: [Notice],
     tools: [
       defineTool({
+        callers: ['model'],
         name: 'begin_account_link',
         description:
           'Start linking another account only when the user asks. Requires a private, authenticated user request. The application sends the secret code directly; you only receive delivery status. Never ask for or process confirmation codes yourself.',
@@ -227,6 +228,7 @@ export function createAccountLinking(access: IdentityAccess, getHarness: () => H
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'list_linked_accounts',
         description:
           'Show the verified requesting user the accounts linked to their identity. Private chats only. Never enumerate another person’s accounts. Show label to the user; accountId is an internal reference for unlink_account, not a display ID. current identifies the account used for this conversation.',
@@ -252,6 +254,7 @@ export function createAccountLinking(access: IdentityAccess, getHarness: () => H
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'unlink_account',
         description:
           'Unlink one account only when the user explicitly asks to remove it. Use an exact accountId from list_linked_accounts; ask which account if ambiguous. Requires a private request from the same identity. The detached account gets a new identity with no shared notes; notes stay with the remaining identity. Existing chat messages are not erased. Cannot remove the last account.',

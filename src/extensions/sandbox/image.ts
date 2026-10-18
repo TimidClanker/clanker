@@ -3,6 +3,7 @@ import { defineTool } from '@earendil-works/pi-durable'
 import { getOrThrow } from '@earendil-works/pi-durable/env'
 
 export const ImageTool = defineTool({
+  callers: ['model'],
   name: 'view_image',
   description:
     'View a PNG, JPEG, or WebP image inside the current sandbox, such as a browser screenshot. Returns the image to the model; does not upload it to chat.',
@@ -17,6 +18,6 @@ export const ImageTool = defineTool({
           ? 'image/webp'
           : undefined
     if (!mimeType) throw new Error('Expected a PNG, JPEG, or WebP image')
-    return { content: [{ type: 'image', mimeType, data: bytes.toString('base64') }] }
+    return { output: [{ type: 'image', mimeType, data: bytes.toString('base64') }] }
   }
 })

@@ -7,7 +7,7 @@ import { resolveTiming, When } from 'extensions/schedules/time'
 export type { ScheduleChat } from 'extensions/schedules/task'
 
 const CreatedSchedule = defineDoc<{ id?: TaskId }>({ kind: 'schedules.creation', version: 1, scope: 'task', initial: () => ({}) })
-const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
+const result = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] })
 
 function describeSchedule(record: TaskRecord<unknown, unknown, unknown>) {
   const task = record as TaskRecord<ScheduleInput, ScheduleState, unknown>
@@ -51,6 +51,7 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
     ],
     tools: [
       defineTool({
+        callers: ['model'],
         name: 'get_schedule_time',
         description: 'Get the current UTC time and local time in an IANA time zone. Defaults to UTC, not the user’s time zone.',
         parameters: Type.Object({ timeZone: Type.Optional(Type.String()) }),
@@ -61,6 +62,7 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'create_schedule',
         description:
           'Create a persistent scheduled task, including reminders, owned by the verified requesting user. The destination conversation handles it as a follow-up when due. Default destination is here; override only at the user’s explicit request. Calendar weekdays use Monday=1 through Sunday=7. Requires an unambiguous single-user request.',
@@ -114,6 +116,7 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'list_schedules',
         description:
           'List the private chat owner’s schedules across linked accounts; in shared chats, list schedules created here or directed here, including active, completed, cancelled, and failed work. Pass nextCursor to continue scanning records, even if a page is empty.',
@@ -137,6 +140,7 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'cancel_schedule',
         description:
           'Cancel the requesting user’s schedule from any linked private chat or its source or destination conversation. Stops future occurrences and withdraws queued events. An event already being handled can finish and post.',

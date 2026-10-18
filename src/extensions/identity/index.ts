@@ -56,13 +56,14 @@ export function createIdentity(access: IdentityAccess, getHarness: () => Harness
         ...createNoteTools(access),
         ...accounts.tools,
         defineTool({
+          callers: ['model'],
           name: 'list_participants',
           description:
             'List senders observed in this conversation, with their current identity IDs and local display names. Not a complete membership list. Only accounts observed here are shown; linked accounts elsewhere are private. Use an identityId to filter list_conversations by participant.',
           parameters: Type.Object({}),
           replay: 'safe',
           execute: async (_args, api, ctx) => ({
-            content: [
+            output: [
               {
                 type: 'text',
                 text: JSON.stringify({
