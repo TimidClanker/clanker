@@ -15,20 +15,11 @@ import {
   type ToolRegistration
 } from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord'
-import { AccessDenied } from 'access'
-import {
-  getDelegation,
-  delegateConversation,
-  getRequestAuthor,
-  getRequestActors,
-  resolveIdentity,
-  getBackgroundInputJobs,
-  identityResolver
-} from 'extensions/identity'
+import { getDelegation, delegateConversation, getRequestAuthor, getBackgroundInputJobs, identityResolver } from 'extensions/identity'
 import { projectScopeSchema } from 'extensions/projects/schema'
 import { active, describeJob, JobCall, JobInputs, Jobs, JobAnswerScopes, type Job } from 'extensions/jobs/state'
 import { checkJob, createJobTasks, notifyJob, type JobAccess } from 'extensions/jobs/task'
-import { readJob } from 'extensions/jobs/access'
+import { readJob, jobVisibility } from 'extensions/jobs/access'
 
 export { readJob, readJobReport, generationJobs, reserveWorkspace } from 'extensions/jobs/access'
 export { JobReported } from 'extensions/jobs/events'
@@ -64,41 +55,7 @@ const id = Type.Integer({ minimum: 1 })
 export function createJobs(chat: JobAccess, getHarness: () => Harness) {
   const { Anchor, Message, Cancel } = createJobTasks(chat, getHarness)
   const background = { ownership: { kind: 'conversation' }, background: true } as const
-  const requester = async (api: ToolExecutionApi, ctx: Context) => {
-    // Internal reports can let the coordinator clarify an existing job, but cannot create fresh user-owned work.
-    const actors = await getRequestActors(api, getHarness(), api.conversationId, ctx, true)
-    if (!actors.length || new Set(actors.map(actor => actor.identityId)).size !== 1) throw new Error('This action requires one verified task owner')
-    return actors.at(-1)!
-  }
-  const scopeVisible = async (job: Job, ctx: Context) => {
-    try {
-      await chat.checkScope(job, ctx)
-      return true
-    } catch (error) {
-      ctx.abortSignal?.throwIfAborted()
-      if (!(error instanceof AccessDenied)) throw error
-      return false
-    }
-  }
-  const visible = async (api: ToolExecutionApi, ctx: Context, includeRevoked = false) => {
-    const author = await requester(api, ctx)
-    const privateIdentity = await chat.privateIdentity(api, api.conversationId, ctx)
-    const jobs = Object.values((await api.snapshot(Jobs, ctx))?.jobs ?? {})
-    const authorized = await getRequestActors(api, getHarness(), api.conversationId, ctx, 'schedules')
-    const reports = authorized.length ? undefined : await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
-    const allowed = await Promise.all(
-      jobs.map(
-        async job =>
-          (!reports || (reports.length === 1 && reports[0] === job.id)) &&
-          (await resolveIdentity(api, job.owner.identityId, ctx)) === author.identityId &&
-          (privateIdentity === author.identityId || job.sourceConversationId === api.conversationId)
-      )
-    )
-    const visible = jobs.filter((_, index) => allowed[index])
-    if (includeRevoked) return visible
-    const scoped = await Promise.all(visible.map(job => scopeVisible(job, ctx)))
-    return visible.filter((_, index) => scoped[index])
-  }
+  const { visible, scopeVisible } = jobVisibility(chat, getHarness)
   const owned = async (api: ToolExecutionApi, value: number, ctx: Context, includeRevoked = false) => {
     const job = (await visible(api, ctx, includeRevoked)).find(job => job.id === value)
     if (!job) throw new Error('Background task not found or not accessible')
