@@ -17,6 +17,7 @@ const Notes = defineDoc<{ notes: Record<string, Note> }>({
   kind: 'identity.notes',
   version: 1,
   scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ notes: {} })
 })
 const NoteChange = defineDoc<{ noteId?: string }>({ kind: 'identity.note-change', version: 1, scope: 'task', initial: () => ({}) })

@@ -6,6 +6,7 @@ export const Threads = defineDoc<{ threads: Record<string, ConversationId> }>({
   kind: 'clanker.threads',
   version: 1,
   scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ threads: {} })
 })
 
@@ -35,5 +36,6 @@ export const Messages = defineDoc<{
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ received: {}, lastTask: null })
 })

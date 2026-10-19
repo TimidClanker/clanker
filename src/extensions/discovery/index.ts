@@ -22,6 +22,7 @@ const Conversations = defineDoc<{
   kind: 'clanker.conversations',
   version: 1,
   scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ conversations: {} })
 })
 
@@ -33,6 +34,7 @@ const Queries = defineDoc<{ queries: Record<string, { conversationId: Conversati
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ queries: {} })
 })
 

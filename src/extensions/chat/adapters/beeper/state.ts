@@ -6,5 +6,6 @@ export const BeeperCheckpoints = defineDoc<Record<string, BeeperCheckpoint>>({
   kind: 'beeper.checkpoints',
   version: 1,
   scope: 'session',
+  checkpointWhen: () => true,
   initial: () => ({})
 })

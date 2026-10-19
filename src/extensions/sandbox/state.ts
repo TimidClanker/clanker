@@ -7,5 +7,6 @@ export const Workspaces = defineDoc<Record<string, { id: string; provider: strin
   kind: 'sandbox.workspaces',
   version: 1,
   scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({})
 })
