@@ -19,7 +19,13 @@ export const Directory = defineDoc<{
   identities: Record<string, { name: string; linkedTo?: string }>
   accounts: Record<string, string>
   accountNames?: Record<string, string>
-}>({ kind: 'identity.directory', version: 1, scope: 'session', initial: () => ({ identities: {}, accounts: {} }) })
+}>({
+  kind: 'identity.directory',
+  version: 1,
+  scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
+  initial: () => ({ identities: {}, accounts: {} })
+})
 
 const ConversationIdentities = defineDoc<{
   participants: Record<string, Author>
@@ -30,6 +36,7 @@ const ConversationIdentities = defineDoc<{
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ participants: {}, messages: {} })
 })
 
@@ -40,6 +47,7 @@ const Delegation = defineDoc<{ sourceConversationId?: ConversationId; jobId?: Ta
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: () => true,
   initial: () => ({})
 })
 
@@ -64,6 +72,7 @@ const AutomatedInputs = defineDoc<Record<string, true | (Author & { kind?: 'sche
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({})
 })
 

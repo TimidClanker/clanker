@@ -25,6 +25,7 @@ export const Jobs = defineDoc<{ jobs: Record<string, Job> }>({
   kind: 'jobs.directory',
   version: 1,
   scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ jobs: {} })
 })
 export const JobInputs = defineDoc<Record<string, number>>({
@@ -33,6 +34,7 @@ export const JobInputs = defineDoc<Record<string, number>>({
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({})
 })
 export const JobCall = defineDoc<{ id?: TaskId }>({
@@ -49,6 +51,7 @@ export const WorkspaceJobs = defineDoc<Record<string, TaskId>>({
   kind: 'jobs.workspaces',
   version: 1,
   scope: 'session',
+  checkpointWhen: () => true,
   initial: () => ({})
 })
 
@@ -59,5 +62,6 @@ export const JobAnswerScopes = defineDoc<{ generations: Record<string, TaskId[]>
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ generations: {} })
 })

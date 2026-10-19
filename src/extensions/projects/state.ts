@@ -29,6 +29,7 @@ export const Projects = defineDoc<{ projects: Record<string, Project> }>({
   kind: 'projects.directory',
   version: 1,
   scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ projects: {} })
 })
 export const ProjectContext = defineDoc<{ links: ProjectScope }>({
@@ -37,6 +38,7 @@ export const ProjectContext = defineDoc<{ links: ProjectScope }>({
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: () => true,
   initial: () => ({ links: [] })
 })
 export const ProjectCall = defineDoc<{
@@ -55,4 +57,12 @@ export type ProjectDisclosure = {
 export const ProjectDisclosures = defineDoc<{
   runs: Record<string, ProjectDisclosure[]>
   generations: Record<string, ProjectDisclosure[]>
-}>({ kind: 'projects.disclosures', version: 1, scope: 'conversation', history: 'latest', fork: 'initial', initial: () => ({ runs: {}, generations: {} }) })
+}>({
+  kind: 'projects.disclosures',
+  version: 1,
+  scope: 'conversation',
+  history: 'latest',
+  fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
+  initial: () => ({ runs: {}, generations: {} })
+})

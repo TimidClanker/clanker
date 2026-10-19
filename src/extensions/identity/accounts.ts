@@ -30,13 +30,20 @@ const Links = defineDoc<{
   contacts: Record<string, Party>
   starts: Record<string, number[]>
   attempts: Record<string, number[]>
-}>({ kind: 'identity.links', version: 1, scope: 'session', initial: () => ({ requests: {}, contacts: {}, starts: {}, attempts: {} }) })
+}>({
+  kind: 'identity.links',
+  version: 1,
+  scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
+  initial: () => ({ requests: {}, contacts: {}, starts: {}, attempts: {} })
+})
 const Audit = defineDoc<{
   events: Record<string, { action: 'link' | 'unlink'; actor: PlatformAccount; account: PlatformAccount; identityId: string; at: number }>
 }>({
   kind: 'identity.account-audit',
   version: 1,
   scope: 'session',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ events: {} })
 })
 const Started = defineDoc<{ requestId?: string; noticeId?: TaskId<null> }>({ kind: 'identity.link-start', version: 1, scope: 'task', initial: () => ({}) })
@@ -47,6 +54,7 @@ const Commands = defineDoc<{ messages: Record<string, true> }>({
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 127,
   initial: () => ({ messages: {} })
 })
 const result = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] })
