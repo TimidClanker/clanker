@@ -40,7 +40,7 @@ const QueryCall = defineDoc<{
   query?: { queryId: ConversationId; conversationId: ConversationId; source: QuerySource; content: string }
 }>({ kind: 'clanker.query-call', version: 1, scope: 'task', initial: () => ({}) })
 
-const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
+const result = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] })
 
 const transcript = (entries: readonly EntryRecord[]) =>
   entries.flatMap(entry => {
@@ -145,6 +145,7 @@ export function createDiscovery(
     ],
     tools: [
       defineTool({
+        callers: ['model'],
         name: 'list_conversations',
         description: 'Find accessible conversations by words in their titles and summaries. Results are newest first; offset pages through matches.',
         parameters: Type.Object({
@@ -171,6 +172,7 @@ export function createDiscovery(
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'read_conversation',
         description:
           'Read stored user and assistant text. Pass nextBefore as before for older pages. For a truncated message, pass its entryId and nextOffset as offset to read the rest.',
@@ -215,6 +217,7 @@ export function createDiscovery(
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'query_conversation',
         description:
           'Ask a durable read-only helper about an accessible conversation. Reuse the returned queryId for follow-ups with saved evidence and dialogue; it belongs only to this requesting conversation and source. Omit queryId to start fresh. Reads up to 200 entries initially; pass nextBefore as before to add older history. Without before, follow-ups use saved evidence, not a refreshed transcript. Returns entry citations. Use read_conversation for exact quotes or truncated entries. Image pixels are excluded.',
@@ -293,6 +296,7 @@ export function createDiscovery(
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'describe_conversation',
         description:
           'Silently update this conversation’s internal discovery title and factual summary when its topic, decisions, or open questions change. This does not rename the source thread.',

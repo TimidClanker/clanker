@@ -74,6 +74,7 @@ export async function createChatIntegration(
   const consumer = createMessageConsumer(enqueuePost, enqueue)
   const Reply = createDelivery(chat, getHarness, Post, consumer, policy.authorizeJob)
   const rename = defineTool({
+    callers: ['model'],
     name: 'rename_thread',
     description:
       'Set a substantive, specific public title for the current thread. Skip greetings and vague summaries. May be called again when the subject meaningfully changes. Does not modify discovery metadata.',
@@ -84,7 +85,7 @@ export async function createChatIntegration(
       const threadId = await threadFor(api, api.conversationId, ctx)
       const platform = platformFor(chat, threadId)
       if (!platform.renameThread) throw new Error('This platform does not support thread renaming')
-      return { content: [{ type: 'text', text: JSON.stringify(await platform.renameThread(threadId, title)) }] }
+      return { output: [{ type: 'text', text: JSON.stringify(await platform.renameThread(threadId, title)) }] }
     }
   })
   const agentFor = (threadId: string) => ({

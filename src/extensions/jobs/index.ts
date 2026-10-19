@@ -58,7 +58,7 @@ const workerTools = new Set([
   'save_work_item',
   'delete_project_record'
 ])
-const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
+const result = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] })
 const id = Type.Integer({ minimum: 1 })
 
 export function createJobs(chat: JobAccess, getHarness: () => Harness) {
@@ -135,6 +135,7 @@ export function createJobs(chat: JobAccess, getHarness: () => Harness) {
   }
 
   const report = defineTool({
+    callers: ['model'],
     name: 'report_background_task',
     description:
       'Worker-only: send meaningful progress or a question internally to the coordinator. A question pauses work until the coordinator replies. Never contact the user directly.',
@@ -244,6 +245,7 @@ export function createJobs(chat: JobAccess, getHarness: () => Harness) {
     ],
     tools: [
       defineTool({
+        callers: ['model'],
         name: 'start_background_task',
         description:
           'Delegate a self-contained task to an independently running worker. Returns immediately; the coordinator receives progress/questions/results internally. Inherits the parent model, with no override. Requires one verified owner’s user request or due schedule; internal worker reports cannot start new work. projectScope is optional and grants only the explicitly selected projects/work items; omitted scopes grant no project tools.',
@@ -313,6 +315,7 @@ export function createJobs(chat: JobAccess, getHarness: () => Harness) {
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'list_background_tasks',
         description: 'List the verified owner’s background tasks across linked private chats; shared chats only expose that owner’s tasks originating here.',
         parameters: Type.Object({}),
@@ -324,6 +327,7 @@ export function createJobs(chat: JobAccess, getHarness: () => Harness) {
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'get_background_task',
         description: 'Inspect an accessible background task’s status, latest progress/question, revision, and result.',
         parameters: Type.Object({ id }),
@@ -335,6 +339,7 @@ export function createJobs(chat: JobAccess, getHarness: () => Harness) {
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'steer_background_task',
         description:
           'Clarify or redirect an existing background task, or answer its question. Returns after durable admission; applied after the current tool round. Never expands the task’s authorization.',
@@ -367,6 +372,7 @@ export function createJobs(chat: JobAccess, getHarness: () => Harness) {
         }
       }),
       defineTool({
+        callers: ['model'],
         name: 'cancel_background_task',
         description:
           'Request cancellation of an accessible background task and its tools. Returns cancelling immediately; cleanup completes independently. Does not roll back completed external actions.',

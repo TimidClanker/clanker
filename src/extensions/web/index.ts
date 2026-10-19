@@ -18,6 +18,7 @@ export const createWeb = (models: Models, searchModel: ReturnType<typeof selectM
     tools: [
       createSearchTool(models, searchModel),
       defineTool({
+        callers: ['model'],
         name: 'web_fetch',
         description:
           'Fetch an HTTP(S) URL with GET and read its text, JSON, or HTML source. Follows redirects. Returns the final URL, HTTP status, and a bounded portion of the body. Pass nextOffset as offset to read more; each call fetches the URL again. Does not render JavaScript or extract PDF/image content.',
@@ -58,7 +59,7 @@ export const createWeb = (models: Models, searchModel: ReturnType<typeof selectM
             const nextOffset = offset + limit < text.length ? offset + limit : null
             return {
               isError: !response.ok,
-              content: [
+              output: [
                 {
                   type: 'text',
                   text: JSON.stringify({

@@ -36,6 +36,8 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
   }
   const bind = <T extends ToolRegistration>(tool: T): T => ({
     ...tool,
+    // Workspace grants are bound to the owning model round, not a nested tool caller.
+    callers: ['model'],
     replay: 'unsafe',
     executionMode: 'sequential',
     async execute(args, api, ctx) {
@@ -79,7 +81,17 @@ export function createSandbox(access: SandboxAccess, getHarness: () => Harness, 
     extension: defineExtension({
       name: 'sandbox',
       tools: [
-        bind(createReadTool()),
+        bind({
+          ...createReadTool({
+            images: {
+              async prepare() {
+                throw new Error('Use view_image to inspect images')
+              }
+            }
+          }),
+          description:
+            'Read a text file, limited to 2000 lines or 50KB. Use offset/limit to continue. Whole-file scans are limited to 16 MiB; use bash to select portions of larger files. Use view_image for images.'
+        }),
         bind(createWriteTool()),
         bind(createEditTool()),
         bind(shell),

@@ -109,7 +109,7 @@ async function searchWeb(models: Models, { model: configuredModel, thinkingLevel
   return {
     isError: error !== undefined,
     usage: result.usage,
-    content: [
+    output: [
       {
         type: 'text' as const,
         text: error
@@ -126,6 +126,7 @@ async function searchWeb(models: Models, { model: configuredModel, thinkingLevel
 
 export const createSearchTool = (models: Models, selection: ReturnType<typeof selectModel>) =>
   defineTool({
+    callers: ['model'],
     name: 'web_search',
     description:
       'Search the live web for a question or keywords. Returns a researched answer and source URLs. Cite those URLs, and use web_fetch to inspect specific pages. Only the query is sent to the search model; include the context it needs.',

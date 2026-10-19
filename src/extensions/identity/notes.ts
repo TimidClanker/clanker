@@ -21,7 +21,7 @@ const Notes = defineDoc<{ notes: Record<string, Note> }>({
 })
 const NoteChange = defineDoc<{ noteId?: string }>({ kind: 'identity.note-change', version: 1, scope: 'task', initial: () => ({}) })
 const visibility = Type.Union([Type.Literal('public'), Type.Literal('private')])
-const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
+const result = (value: unknown) => ({ output: [{ type: 'text' as const, text: JSON.stringify(value) }] })
 
 async function noteAccess(read: DocumentReader, conversationId: ConversationId, identityId: string, access: IdentityAccess, ctx: Context) {
   const identity = await getIdentity(read, identityId, ctx)
@@ -92,6 +92,7 @@ export function createNoteTools(access: IdentityAccess) {
 
   return [
     defineTool({
+      callers: ['model'],
       name: 'read_user_notes',
       description:
         'Read saved memories about an observed participant. Public notes are available across conversations. Private notes are returned only in a verified one-to-one chat with that identity, including linked accounts. privateAvailable describes access, not whether hidden notes exist. Results are newest first.',
@@ -108,6 +109,7 @@ export function createNoteTools(access: IdentityAccess) {
       }
     }),
     defineTool({
+      callers: ['model'],
       name: 'save_user_note',
       description:
         'Save a concise factual memory about an observed participant. Supply noteId to update an existing note. Choose visibility explicitly: public means shareable across conversations; private requires a verified one-to-one chat with the owner. Changing visibility also requires that private chat. Read existing notes first to avoid duplicates and replace outdated facts.',
@@ -123,6 +125,7 @@ export function createNoteTools(access: IdentityAccess) {
         result({ noteId: await changeNote(api, ctx, identityId, noteId, { visibility, text }) })
     }),
     defineTool({
+      callers: ['model'],
       name: 'delete_user_note',
       description: 'Delete a saved memory by noteId. Private notes can only be deleted in a verified one-to-one chat with their owner.',
       parameters: Type.Object({ identityId: Type.String({ minLength: 1 }), noteId: Type.String({ minLength: 1 }) }),
