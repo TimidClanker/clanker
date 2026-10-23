@@ -2,7 +2,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import type { Models } from '@earendil-works/pi-ai'
 import { createRegistry, defineExtension, Harness, section, type Extension, type Storage } from '@earendil-works/pi-durable'
 
-export function openAgent(storage: Storage, models: Models, extensions: Extension[]) {
+export function openAgent(storage: Storage, models: Models, extensions: Extension[], onReport?: () => void) {
   const registry = createRegistry()
   registry.install(
     defineExtension({
@@ -27,7 +27,10 @@ export function openAgent(storage: Storage, models: Models, extensions: Extensio
       models,
       registry,
       settings: { steeringMode: 'all', followUpMode: 'all', stream: { timeoutMs: 120_000 } },
-      onReport: console.error
+      onReport: error => {
+        onReport?.()
+        console.error(error)
+      }
     },
     BACKGROUND_CONTEXT
   )

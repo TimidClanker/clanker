@@ -49,13 +49,19 @@ export async function createChatIntegration(
   const shutdown = new AbortController()
   let listening: Promise<unknown> = Promise.resolve()
   let closing: Promise<void> | undefined
-  const checkDestination: ChatAccess['check'] = async (destination, account, ctx, read = getHarness()) => {
+  const verifyDestination: ChatAccess['check'] = async (destination, account, ctx, read = getHarness()) => {
+    ctx.abortSignal?.throwIfAborted()
     const platform = platformFor(chat, destination.threadId)
     if (!platform.resolveDestination) throw new Error('This platform cannot verify scheduled task destinations')
     const peer = await platform.privateRecipient?.(destination.threadId)
+    ctx.abortSignal?.throwIfAborted()
     const owner = await findIdentity(read, account, ctx)
     const linked = peer && owner && (await findIdentity(read, peer, ctx)) === owner
     await platform.resolveDestination(destination.threadId, linked ? peer : account, destination.threadId)
+    ctx.abortSignal?.throwIfAborted()
+  }
+  const checkDestination: ChatAccess['check'] = async (destination, account, ctx, read) => {
+    await verifyDestination(destination, account, ctx, read)
     await chat.thread(destination.threadId).subscribe()
   }
   const Post = createPost(chat, policy.authorizeJob, policy.authorizeProject)
@@ -113,7 +119,9 @@ export async function createChatIntegration(
   }
   const access: ChatAccess = {
     async privateIdentity(read, conversationId, ctx) {
+      ctx.abortSignal?.throwIfAborted()
       const account = await identityAccess.privateAccount(read, conversationId, ctx)
+      ctx.abortSignal?.throwIfAborted()
       return account ? await findIdentity(read, account, ctx) : undefined
     },
     check: checkDestination,
@@ -122,6 +130,7 @@ export async function createChatIntegration(
 
   return {
     access,
+    readOnlyAccess: { ...access, check: verifyDestination } satisfies ChatAccess,
     media: (async (images, api, ctx) => {
       const threadId = await threadFor(api, api.conversationId, ctx)
       const jobs = await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)

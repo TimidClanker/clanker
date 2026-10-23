@@ -3,15 +3,25 @@ import type { Models } from '@earendil-works/pi-ai'
 import type { Extension, Harness } from '@earendil-works/pi-durable'
 import { openAgent } from 'agent'
 import { openStorage } from 'storage'
+import { createRuntimeStatus } from 'status/runtime'
 
 /** Keep chat intake alive while replacing a harness whose database was owned by another process. */
-export function createRuntime(models: Models, extensions: Extension[], signal: AbortSignal, onReady: (harness: Harness) => Promise<void>) {
+export function createRuntime(
+  models: Models,
+  extensions: Extension[],
+  signal: AbortSignal,
+  onReady: (harness: Harness) => Promise<void>,
+  status = createRuntimeStatus()
+) {
   let current: Harness
   let changing = false
   let ready = Promise.withResolvers<Harness>()
   void ready.promise.catch(() => {})
   const stopped = Promise.withResolvers<void>()
-  const stop = () => stopped.resolve()
+  const stop = () => {
+    status.set('closing')
+    stopped.resolve()
+  }
   signal.addEventListener('abort', stop, { once: true })
   const finished = (async () => {
     try {
@@ -24,6 +34,8 @@ export function createRuntime(models: Models, extensions: Extension[], signal: A
             signal,
             onOwnershipLost() {
               ownershipChanged = changing = true
+              status.event('ownership_lost')
+              status.set('recovering')
               const previous = ready
               ready = Promise.withResolvers<Harness>()
               void ready.promise.catch(() => {})
@@ -33,17 +45,19 @@ export function createRuntime(models: Models, extensions: Extension[], signal: A
             }
           })
           try {
-            active = await openAgent(storage, models, extensions)
+            active = await openAgent(storage, models, extensions, () => status.event('runtime_report'))
             current = active
             await onReady(active)
             changing = false
             ready.resolve(active)
             active.resume()
+            status.ready(active, storage)
             const end = await Promise.race([lost.promise, stopped.promise, active.closed])
             // Pi 1.2+ closes a failed Session itself. Surface the failure; never replay application work.
             if (end?.reason === 'failed') throw end.error
             if (end?.reason === 'closed' && !signal.aborted) throw new Error('Agent session closed unexpectedly')
           } finally {
+            status.set(signal.aborted ? 'closing' : 'recovering')
             await active?.close(BACKGROUND_CONTEXT)
           }
         } catch (error) {
@@ -51,15 +65,19 @@ export function createRuntime(models: Models, extensions: Extension[], signal: A
         }
       }
     } catch (error) {
+      status.event('runtime_failed')
+      status.set(signal.aborted ? 'closing' : 'failed')
       ready.reject(error)
       if (!signal.aborted) throw error
     } finally {
+      if (status.capture().phase !== 'failed') status.set('stopped')
       signal.removeEventListener('abort', stop)
       ready.reject(signal.reason ?? new Error('Agent runtime stopped'))
     }
   })()
   return {
     get: () => current,
+    status,
     finished,
     async use<T>(work: (harness: Harness) => Promise<T>): Promise<T> {
       for (;;) {

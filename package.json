@@ -4,6 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "status": "bun run src/status/cli.ts",
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
     "auth": "bun run src/auth/cli.ts",

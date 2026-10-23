@@ -1,5 +1,6 @@
 import { Type } from '@earendil-works/pi-ai'
 import { defineDoc, defineExtension, defineTool, section, type Harness, type TaskId, type TaskRecord } from '@earendil-works/pi-durable'
+import { visibleSchedules } from 'extensions/schedules/access'
 import { resolveIdentity, getRequestAuthor } from 'extensions/identity'
 import { createScheduleTask, type ScheduleChat, type ScheduleInput, type ScheduleState } from 'extensions/schedules/task'
 import { resolveTiming, When } from 'extensions/schedules/time'
@@ -124,17 +125,9 @@ export function createSchedules(chat: ScheduleChat, getHarness: () => Harness) {
         replay: 'safe',
         execute: async ({ limit = 20, cursor }, api, ctx) => {
           const page = await api.commit(tx => tx.scanTasks({ kind: Schedule.definition.name }, limit, cursor ? JSON.parse(cursor) : undefined), ctx)
-          const identity = await chat.privateIdentity(api, api.conversationId, ctx)
-          const visible = await Promise.all(
-            page.items.map(async task => {
-              const input = task.input as ScheduleInput
-              return identity
-                ? (await resolveIdentity(api, input.ownerIdentityId, ctx)) === identity
-                : task.conversationId === api.conversationId || input.sourceConversationId === api.conversationId
-            })
-          )
+          const visible = await visibleSchedules(page.items, api, api.conversationId, chat, ctx)
           return result({
-            schedules: page.items.filter((_, index) => visible[index]).map(describeSchedule),
+            schedules: visible.map(describeSchedule),
             nextCursor: page.next ? JSON.stringify(page.next) : null
           })
         }

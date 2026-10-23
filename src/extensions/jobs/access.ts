@@ -1,6 +1,8 @@
 import type { Context } from '@earendil-works/chord'
-import type { ConversationId, DocumentReader, EntryRecord, TaskId, Tx } from '@earendil-works/pi-durable'
-import { getDelegation, accountKey } from 'extensions/identity'
+import type { ConversationId, DocumentReader, EntryRecord, TaskId, Tx, ToolExecutionApi, Harness } from '@earendil-works/pi-durable'
+import { AccessDenied } from 'access'
+import type { JobAccess } from 'extensions/jobs/task'
+import { getDelegation, accountKey, getRequestActors, resolveIdentity, getBackgroundInputJobs } from 'extensions/identity'
 import { active, Jobs, JobAnswerScopes, WorkspaceJobs, type Job } from 'extensions/jobs/state'
 import { JobReported } from 'extensions/jobs/events'
 
@@ -54,4 +56,46 @@ export async function reserveWorkspace(tx: Tx, workspaceId: string, jobId?: Task
     if (jobs[jobId]?.status !== 'running') throw new Error('Background task is not running')
     leases[workspaceId] = jobId
   } else delete leases[workspaceId]
+}
+
+/** Shared read-only authorization for job lists and operational status. */
+export function jobVisibility(chat: Pick<JobAccess, 'privateIdentity' | 'checkScope'>, getHarness: () => Harness) {
+  const requester = async (api: ToolExecutionApi, ctx: Context) => {
+    // Internal reports can let the coordinator clarify an existing job, but cannot create fresh user-owned work.
+    const actors = await getRequestActors(api, getHarness(), api.conversationId, ctx, true)
+    if (!actors.length || new Set(actors.map(actor => actor.identityId)).size !== 1) throw new Error('This action requires one verified task owner')
+    return actors.at(-1)!
+  }
+  const scopeVisible = async (job: Job, ctx: Context) => {
+    try {
+      await chat.checkScope(job, ctx)
+      return true
+    } catch (error) {
+      ctx.abortSignal?.throwIfAborted()
+      if (!(error instanceof AccessDenied)) throw error
+      return false
+    }
+  }
+  const page = async (api: ToolExecutionApi, ctx: Context, includeRevoked = false, limit = Infinity) => {
+    const author = await requester(api, ctx)
+    const privateIdentity = await chat.privateIdentity(api, api.conversationId, ctx)
+    const jobs = Object.values((await api.snapshot(Jobs, ctx))?.jobs ?? {})
+    const authorized = await getRequestActors(api, getHarness(), api.conversationId, ctx, 'schedules')
+    const reports = authorized.length ? undefined : await getBackgroundInputJobs(api, getHarness(), api.conversationId, ctx)
+    const allowed = await Promise.all(
+      jobs.map(
+        async job =>
+          (!reports || (reports.length === 1 && reports[0] === job.id)) &&
+          (await resolveIdentity(api, job.owner.identityId, ctx)) === author.identityId &&
+          (privateIdentity === author.identityId || job.sourceConversationId === api.conversationId)
+      )
+    )
+    const candidates = jobs.filter((_, index) => allowed[index])
+    const visible = limit === Infinity ? candidates : candidates.toReversed().slice(0, limit)
+    const truncated = candidates.length > limit
+    if (includeRevoked) return { jobs: visible, truncated }
+    const scoped = await Promise.all(visible.map(job => scopeVisible(job, ctx)))
+    return { jobs: visible.filter((_, index) => scoped[index]), truncated }
+  }
+  return { page, visible: async (api: ToolExecutionApi, ctx: Context, includeRevoked = false) => (await page(api, ctx, includeRevoked)).jobs, scopeVisible }
 }
